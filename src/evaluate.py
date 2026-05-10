@@ -39,7 +39,7 @@ def evaluate_model(model, test_ratings, test_negatives, dataset, device, K=10,
             all_user_rows  = []
             all_item_cols  = []
             all_user_ids   = []
-            all_item_ids   = []   # needed for NeuMF and item-masked models
+            all_item_ids   = []   # needed for item-masked models
 
             for u, pos_item in batch_ratings:
                 neg_items   = test_negatives[u]

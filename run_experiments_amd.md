@@ -19,19 +19,19 @@ python main.py --model deepcf --dataset ml-1m --config configs/ml-1m.yaml --devi
 python main.py --model static_mask --dataset ml-1m --config configs/ml-1m.yaml --device auto --runs 1
 ```
 
-**3. Static Mask with Attention (Baseline)**
+**3. RP-UCB (User+Item Masking)**
 ```bash
-python main.py --model static_mask_attn --dataset ml-1m --config configs/ml-1m.yaml --device cuda:0 --runs 1
+python main.py --model rpucb --dataset ml-1m --config configs/ml-1m.yaml --device auto --runs 1
 ```
 
-**4. RP-UCB (Our Method)**
+**4. RP-UCB with Attention (User Only)**
 ```bash
-python main.py --model rpucb --dataset ml-1m --config configs/ml-1m.yaml --device cuda:0 --runs 1
+python main.py --model rpucb_attn --dataset ml-1m --config configs/ml-1m.yaml --device auto --runs 1
 ```
 
-**5. RP-UCB with Attention (Our Method)**
+**5. RP-UCB with Attention (User+Item)**
 ```bash
-python main.py --model rpucb_attn --dataset ml-1m --config configs/ml-1m.yaml --device cuda:0 --runs 1
+python main.py --model rpucb_attn_full --dataset ml-1m --config configs/ml-1m.yaml --device auto --runs 1
 ```
 
 ---
@@ -40,27 +40,27 @@ python main.py --model rpucb_attn --dataset ml-1m --config configs/ml-1m.yaml --
 
 **6. Baseline DeepCF**
 ```bash
-python main.py --model deepcf --dataset AMusic --config configs/AMusic.yaml --device cuda:0 --runs 1
+python main.py --model deepcf --dataset AMusic --config configs/AMusic.yaml --device auto --runs 1
 ```
 
 **7. Static Mask (Baseline)**
 ```bash
-python main.py --model static_mask --dataset AMusic --config configs/AMusic.yaml --device cuda:0 --runs 1
+python main.py --model static_mask --dataset AMusic --config configs/AMusic.yaml --device auto --runs 1
 ```
 
-**8. Static Mask with Attention (Baseline)**
+**8. RP-UCB (User+Item Masking)**
 ```bash
-python main.py --model static_mask_attn --dataset AMusic --config configs/AMusic.yaml --device cuda:0 --runs 1
+python main.py --model rpucb --dataset AMusic --config configs/AMusic.yaml --device auto --runs 1
 ```
 
-**9. RP-UCB (Our Method)**
+**9. RP-UCB with Attention (User Only)**
 ```bash
-python main.py --model rpucb --dataset AMusic --config configs/AMusic.yaml --device cuda:0 --runs 1
+python main.py --model rpucb_attn --dataset AMusic --config configs/AMusic.yaml --device auto --runs 1
 ```
 
-**10. RP-UCB with Attention (Our Method)**
+**10. RP-UCB with Attention (User+Item)**
 ```bash
-python main.py --model rpucb_attn --dataset AMusic --config configs/AMusic.yaml --device cuda:0 --runs 1
+python main.py --model rpucb_attn_full --dataset AMusic --config configs/AMusic.yaml --device auto --runs 1
 ```
 
 ---
@@ -69,27 +69,27 @@ python main.py --model rpucb_attn --dataset AMusic --config configs/AMusic.yaml 
 
 **11. Baseline DeepCF**
 ```bash
-python main.py --model deepcf --dataset citeulike --config configs/citeulike.yaml --device cuda:0 --runs 1
+python main.py --model deepcf --dataset citeulike --config configs/citeulike.yaml --device auto --runs 1
 ```
 
 **12. Static Mask (Baseline)**
 ```bash
-python main.py --model static_mask --dataset citeulike --config configs/citeulike.yaml --device cuda:0 --runs 1
+python main.py --model static_mask --dataset citeulike --config configs/citeulike.yaml --device auto --runs 1
 ```
 
-**13. Static Mask with Attention (Baseline)**
+**13. RP-UCB (User+Item Masking)**
 ```bash
-python main.py --model static_mask_attn --dataset citeulike --config configs/citeulike.yaml --device cuda:0 --runs 1
+python main.py --model rpucb --dataset citeulike --config configs/citeulike.yaml --device auto --runs 1
 ```
 
-**14. RP-UCB (Our Method)**
+**14. RP-UCB with Attention (User Only)**
 ```bash
-python main.py --model rpucb --dataset citeulike --config configs/citeulike.yaml --device cuda:0 --runs 1
+python main.py --model rpucb_attn --dataset citeulike --config configs/citeulike.yaml --device auto --runs 1
 ```
 
-**15. RP-UCB with Attention (Our Method)**
+**15. RP-UCB with Attention (User+Item)**
 ```bash
-python main.py --model rpucb_attn --dataset citeulike --config configs/citeulike.yaml --device cuda:0 --runs 1
+python main.py --model rpucb_attn_full --dataset citeulike --config configs/citeulike.yaml --device auto --runs 1
 ```
 
 ---
@@ -102,3 +102,12 @@ After running the experiments, run this final command to print out the aggregate
 ```bash
 python -c "from src.utils import print_results_table; print_results_table()"
 ```
+
+---
+
+## Notes
+
+- Each model is run with `--runs 1` for quick feedback. For full reproducible results, increase to `--runs 3`.
+- The `--device auto` flag will automatically detect your GPU. You can also explicitly specify `--device cuda:0` for GPU or `--device cpu` for CPU.
+- Total experiments: 5 models × 3 datasets = 15 experiments
+- Estimated runtime on CPU: ~4 hours. On GPU: ~45 minutes (varies by hardware).

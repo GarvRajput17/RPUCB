@@ -32,3 +32,12 @@ runs/
 # ── Scratch / temp ────────────────────────────────────────────────────────────
 *.tmp
 *.bak
+
+# ── Standard Python ignores ────────────────────────────────────────────────────
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.env
+.venv 

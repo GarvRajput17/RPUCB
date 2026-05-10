@@ -1,6 +1,5 @@
 from .base import BaseCF, build_mlp
 from .attention import SelfAttentionInteraction
-from .neumf import NeuMF
 from .deepcf import DeepCF
 from .deepcf_static_mask import DeepCFStaticMask
 from .deepcf_rpucb import DeepCFRPUCB
@@ -11,7 +10,6 @@ __all__ = [
     'BaseCF',
     'build_mlp',
     'SelfAttentionInteraction',
-    'NeuMF',
     'DeepCF',
     'DeepCFStaticMask',
     'DeepCFRPUCB',
