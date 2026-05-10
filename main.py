@@ -6,11 +6,11 @@ import numpy as np
 
 from src.data.dataset import RecDataset
 from src.train import train_model
-from src.models import NeuMF, DeepCF, DeepCFStaticMask, DeepCFRPUCB, RPUCBAttn, RPUCBAttnFull
+from src.models import DeepCF, DeepCFStaticMask, DeepCFRPUCB, RPUCBAttn, RPUCBAttnFull
 from src.utils import save_results, print_results_table
 
 # ── Valid model / dataset options ────────────────────────────────────────────
-MODEL_CHOICES = ['neumf', 'deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full']
+MODEL_CHOICES = ['deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full']
 DATASET_CHOICES = ['ml-1m', 'AMusic', 'citeulike']
 
 
@@ -23,11 +23,7 @@ def build_model(model_name, num_users, num_items, config, dataset):
     gamma_init = config.get('gamma_init', 2.0)
     beta       = config.get('beta', 1.0)
 
-    if model_name == 'neumf':
-        return NeuMF(num_users, num_items, embed_dim,
-                     mlp_layers=ml_layers, dropout=dropout)
-
-    elif model_name == 'deepcf':
+    if model_name == 'deepcf':
         return DeepCF(num_users, num_items, embed_dim,
                       rl_layers, ml_layers, dropout=dropout)
 

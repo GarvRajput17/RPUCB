@@ -8,7 +8,7 @@ from .evaluate import evaluate_model
 def train_one_epoch(model, dataloader, optimizer, device, lambda_l1, model_type,
                     interaction_rows_gpu, interaction_cols_gpu):
     """
-    model_type: one of ['neumf', 'deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full']
+    model_type: one of ['deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full']
     Returns: float mean training loss for the epoch.
     """
     model.train()
@@ -35,15 +35,8 @@ def train_one_epoch(model, dataloader, optimizer, device, lambda_l1, model_type,
         user_ids_tiled    = user_ids.repeat(num_negatives)               # [B*K]
         neg_item_ids_flat = torch.cat([n for n in neg_items_idx], dim=0) # [B*K]
 
-        # ── NeuMF ────────────────────────────────────────────────────────────
-        if model_type == 'neumf':
-            pos_scores     = model.score_neumf(user_ids, pos_items)
-            all_neg_scores = model.score_neumf(user_ids_tiled, neg_item_ids_flat)
-            neg_scores     = all_neg_scores.view(num_negatives, B).t()
-            loss           = bpr_loss(pos_scores, neg_scores)
-
         # ── DeepCF (no mask) ─────────────────────────────────────────────────
-        elif model_type == 'deepcf':
+        if model_type == 'deepcf':
             pos_scores     = model(user_row, pos_item_col)
             all_neg_scores = model(user_row_tiled, neg_cols_stacked)
             neg_scores     = all_neg_scores.view(num_negatives, B).t()
