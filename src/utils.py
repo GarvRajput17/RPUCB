@@ -3,13 +3,13 @@ import json
 import numpy as np
 
 # ── Canonical model list ──────────────────────────────────────────────────────
-ALL_MODELS = ['neumf', 'deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full']
+ALL_MODELS = ['deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full']
 ALL_DATASETS = ['ml-1m', 'AMusic', 'citeulike']
 
 MODEL_DISPLAY = {
-    'neumf':           'NeuMF',
+
     'deepcf':          'DeepCF',
-    'static_mask':     'DeepCF + Static Mask',
+    'static_mask':     'DeepCF + Static Mask + Attn',
     'rpucb':           'DeepCF + RP-UCB (User+Item)',
     'rpucb_attn':      'RP-UCB + Attn (User only)',
     'rpucb_attn_full': 'RP-UCB + Attn (User+Item)',

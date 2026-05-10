@@ -4,7 +4,7 @@ set -e
 DEVICE=${1:-cpu}  # Pass 'cuda' as first arg to use GPU
 
 # ── 6 models x 3 datasets = 18 experiment combos ────────────────────────────
-MODELS="neumf deepcf static_mask rpucb rpucb_attn rpucb_attn_full"
+MODELS="deepcf static_mask rpucb rpucb_attn rpucb_attn_full"
 DATASETS="ml-1m AMusic citeulike"
 
 for dataset in $DATASETS; do

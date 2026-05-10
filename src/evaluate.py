@@ -27,8 +27,6 @@ def evaluate_model(model, test_ratings, test_negatives, dataset, device, K=10,
     if interaction_cols_gpu is None:
         interaction_cols_gpu = dataset.interaction_cols.to(device)
 
-    # Detect NeuMF by checking for the score_neumf method
-    is_neumf = hasattr(model, 'score_neumf')
 
     hr_list   = []
     ndcg_list = []
@@ -41,7 +39,7 @@ def evaluate_model(model, test_ratings, test_negatives, dataset, device, K=10,
             all_user_rows  = []
             all_item_cols  = []
             all_user_ids   = []
-            all_item_ids   = []   # needed for NeuMF and item-masked models
+            all_item_ids   = []   # needed for item-masked models
 
             for u, pos_item in batch_ratings:
                 neg_items   = test_negatives[u]
@@ -61,13 +59,10 @@ def evaluate_model(model, test_ratings, test_negatives, dataset, device, K=10,
             batch_item_ids  = torch.LongTensor(all_item_ids).to(device)
 
             # ── Forward pass ────────────────────────────────────────────────
-            if is_neumf:
-                scores = model.score_neumf(batch_user_ids, batch_item_ids)
-            else:
-                scores = model(batch_user_rows, batch_item_cols,
-                               batch_user_ids, batch_item_ids)
-                if isinstance(scores, tuple):
-                    scores = scores[0]
+            scores = model(batch_user_rows, batch_item_cols,
+                           batch_user_ids, batch_item_ids)
+            if isinstance(scores, tuple):
+                scores = scores[0]
 
             scores = scores.cpu().numpy()
 
