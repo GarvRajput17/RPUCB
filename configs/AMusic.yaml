@@ -1,0 +1,14 @@
+dataset: AMusic
+data_path: data/AMusic
+num_negatives: 8
+batch_size: 64
+epochs: 12
+lr: 0.001
+embed_dim: 64
+rl_layers: [1024, 512, 64]      # AMusic has more items than users; wider early layers
+ml_layers: [1024, 512, 64]
+attn_heads: 2
+attn_dim: 64
+lambda_l1: 0.0001
+dropout: 0.0
+seed: 42

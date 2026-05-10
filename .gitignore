@@ -1,0 +1,34 @@
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+
+# ── Data (raw datasets are large; commit only configs/scripts) ────────────────
+data/*/
+# Allow the empty directory placeholder if you use one
+!data/.gitkeep
+
+# ── Results (generated at runtime — do NOT commit) ───────────────────────────
+results/*.json
+results_old/
+
+# ── Model checkpoints ─────────────────────────────────────────────────────────
+*.pt
+*.pth
+*.ckpt
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+wandb/
+runs/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+._*
+
+# ── Zip exports (submit separately) ──────────────────────────────────────────
+*.zip
+
+# ── Scratch / temp ────────────────────────────────────────────────────────────
+*.tmp
+*.bak
