@@ -6,7 +6,7 @@ import numpy as np
 
 from src.data.dataset import RecDataset
 from src.train import train_model
-from src.models import DeepCF, DeepCFStaticMask, DeepCFRPUCB, RPUCBAttn, RPUCBAttnFull
+from src.models import DeepCF, DeepCFStaticMaskAttn, DeepCFRPUCB, RPUCBAttn, RPUCBAttnFull
 from src.utils import save_results, print_results_table
 
 # ── Valid model / dataset options ────────────────────────────────────────────
@@ -28,8 +28,8 @@ def build_model(model_name, num_users, num_items, config, dataset):
                       rl_layers, ml_layers, dropout=dropout)
 
     elif model_name == 'static_mask':
-        return DeepCFStaticMask(num_users, num_items, embed_dim,
-                                rl_layers, ml_layers, dropout=dropout)
+        return DeepCFStaticMaskAttn(num_users, num_items, embed_dim,
+                                    rl_layers, ml_layers, attn_heads=attn_heads, dropout=dropout)
 
     elif model_name == 'rpucb':
         return DeepCFRPUCB(

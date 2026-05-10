@@ -26,7 +26,7 @@ where `w_u` is a per-user learnable vector, `gamma_U` is a global learnable conf
 | Key | Description |
 |---|---|
 | `deepcf` | Deep Collaborative Filtering — interaction-profile embeddings, RL + ML branches |
-| `static_mask` | DeepCF with a learned sigmoid mask on user embeddings, no exploration term |
+| `static_mask` | DeepCF + Static Mask + Attn (User only mask), no exploration term |
 | `rpucb` | DeepCF + RP-UCB mask applied to both user and item embeddings |
 | `rpucb_attn` | RP-UCB (user side) + Self-Attention interaction module |
 | `rpucb_attn_full` | RP-UCB (user + item) + Self-Attention interaction module |
@@ -63,9 +63,9 @@ All values are means over multiple independent runs. Improvements are relative t
 │   └── run_all.sh            # Run all 6 x 3 experiment combinations
 ├── src/
 │   ├── models/
-│   │   ├── neumf.py
+
 │   │   ├── deepcf.py
-│   │   ├── deepcf_static_mask.py
+│   │   ├── deepcf_static_mask_attn.py
 │   │   ├── deepcf_rpucb.py
 │   │   ├── rpucb_attn.py
 │   │   └── rpucb_attn_full.py
@@ -106,7 +106,7 @@ All 18 combinations (6 models x 3 datasets):
 bash experiments/run_all.sh cuda   # or cpu
 ```
 
-Available model keys: `neumf`, `deepcf`, `static_mask`, `rpucb`, `rpucb_attn`, `rpucb_attn_full`  
+Available model keys: `deepcf`, `static_mask`, `rpucb`, `rpucb_attn`, `rpucb_attn_full`  
 Available datasets: `ml-1m`, `AMusic`, `citeulike`
 
 ---

@@ -30,3 +30,4 @@ class SelfAttentionInteraction(nn.Module):
             return self.output_proj(attn_out)    # [batch, output_dim]
         else:
             return attn_out
+        

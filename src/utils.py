@@ -8,7 +8,7 @@ ALL_DATASETS = ['ml-1m', 'AMusic', 'citeulike']
 
 MODEL_DISPLAY = {
     'deepcf':          'DeepCF',
-    'static_mask':     'DeepCF + Static Mask',
+    'static_mask':     'DeepCF + Static Mask + Attn',
     'rpucb':           'DeepCF + RP-UCB (User+Item)',
     'rpucb_attn':      'RP-UCB + Attn (User only)',
     'rpucb_attn_full': 'RP-UCB + Attn (User+Item)',
