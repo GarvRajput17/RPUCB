@@ -14,3 +14,12 @@ dropout: 0.0
 gamma_init: 2.0
 beta: 0.05
 seed: 42
+
+# Pinterest-family settings
+K: 7
+max_hist_len: 50
+summarization_hidden: 256
+n_fields: 4
+n_heads_dhen: 2
+transformer_layers: 2
+routing_iters: 3

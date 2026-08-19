@@ -6,23 +6,42 @@ import numpy as np
 
 from src.data.dataset import RecDataset
 from src.train import train_model
-from src.models import DeepCF, DeepCFStaticMaskAttn, DeepCFRPUCB, RPUCBAttn, RPUCBAttnFull
+from src.models import (
+    DeepCF, DeepCFStaticMaskAttn, DeepCFRPUCB, RPUCBAttn, RPUCBAttnFull,
+    PinterestBase, PinterestBaseRPUCB, PinterestDCM, PinterestDCMRPUCB,
+)
 from src.utils import save_results, print_results_table
 
 # ── Valid model / dataset options ────────────────────────────────────────────
-MODEL_CHOICES = ['deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full']
+MODEL_CHOICES = [
+    # Original DeepCF family
+    'deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full',
+    # Pinterest family
+    'pinterest_base', 'pinterest_base_rpucb', 'pinterest_base_rpucb_kd',
+    'pinterest_dcm', 'pinterest_dcm_rpucb',
+]
 DATASET_CHOICES = ['ml-1m', 'AMusic', 'citeulike']
 
 
 def build_model(model_name, num_users, num_items, config, dataset):
     embed_dim  = config['embed_dim']
-    rl_layers  = config['rl_layers']
-    ml_layers  = config['ml_layers']
+    rl_layers  = config.get('rl_layers', [512, 256, 128, 64])
+    ml_layers  = config.get('ml_layers', [512, 256, 128, 64])
     attn_heads = config.get('attn_heads', 2)
     dropout    = config.get('dropout', 0.0)
     gamma_init = config.get('gamma_init', 2.0)
     beta       = config.get('beta', 1.0)
 
+    # Pinterest-family shared config
+    K                    = config.get('K', 7)
+    max_hist_len         = config.get('max_hist_len', 50)
+    summarization_hidden = config.get('summarization_hidden', 256)
+    n_fields             = config.get('n_fields', 4)
+    n_heads_dhen         = config.get('n_heads_dhen', 2)
+    transformer_layers   = config.get('transformer_layers', 2)
+    routing_iters        = config.get('routing_iters', 3)
+
+    # ── Original DeepCF family ─────────────────────────────────────────────
     if model_name == 'deepcf':
         return DeepCF(num_users, num_items, embed_dim,
                       rl_layers, ml_layers, dropout=dropout)
@@ -53,6 +72,50 @@ def build_model(model_name, num_users, num_items, config, dataset):
             user_interaction_counts=dataset.user_interaction_counts,
             item_interaction_counts=dataset.item_interaction_counts,
             attn_heads=attn_heads, dropout=dropout,
+            gamma_init=gamma_init, beta=beta,
+        )
+
+    # ── Pinterest family ───────────────────────────────────────────────────
+    elif model_name == 'pinterest_base':
+        return PinterestBase(
+            num_users, num_items, embed_dim=embed_dim,
+            summarization_hidden=summarization_hidden, n_fields=n_fields,
+            n_heads_dhen=n_heads_dhen, transformer_layers=transformer_layers,
+            attn_heads=attn_heads, dropout=dropout,
+        )
+
+    elif model_name in ('pinterest_base_rpucb', 'pinterest_base_rpucb_kd'):
+        effective_dim = K * embed_dim if model_name == 'pinterest_base_rpucb_kd' else embed_dim
+        return PinterestBaseRPUCB(
+            num_users, num_items, embed_dim=effective_dim, item_embed_dim=embed_dim,
+            summarization_hidden=summarization_hidden, n_fields=n_fields,
+            n_heads_dhen=n_heads_dhen, transformer_layers=transformer_layers,
+            attn_heads=attn_heads, dropout=dropout,
+            user_interaction_counts=dataset.user_interaction_counts,
+            gamma_init=gamma_init, beta=beta,
+        )
+
+    elif model_name == 'pinterest_dcm':
+        return PinterestDCM(
+            num_users, num_items, embed_dim=embed_dim, K=K,
+            user_train_items=dataset.user_train_items,
+            interaction_cols=dataset.interaction_cols,
+            max_hist_len=max_hist_len,
+            summarization_hidden=summarization_hidden, n_fields=n_fields,
+            n_heads_dhen=n_heads_dhen, transformer_layers=transformer_layers,
+            attn_heads=attn_heads, routing_iters=routing_iters, dropout=dropout,
+        )
+
+    elif model_name == 'pinterest_dcm_rpucb':
+        return PinterestDCMRPUCB(
+            num_users, num_items, embed_dim=embed_dim, K=K,
+            user_train_items=dataset.user_train_items,
+            interaction_cols=dataset.interaction_cols,
+            max_hist_len=max_hist_len,
+            summarization_hidden=summarization_hidden, n_fields=n_fields,
+            n_heads_dhen=n_heads_dhen, transformer_layers=transformer_layers,
+            attn_heads=attn_heads, routing_iters=routing_iters, dropout=dropout,
+            user_interaction_counts=dataset.user_interaction_counts,
             gamma_init=gamma_init, beta=beta,
         )
 

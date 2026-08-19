@@ -8,7 +8,7 @@ from .evaluate import evaluate_model
 def train_one_epoch(model, dataloader, optimizer, device, lambda_l1, model_type,
                     interaction_rows_gpu, interaction_cols_gpu):
     """
-    model_type: one of ['deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full']
+    model_type: one of the MODEL_CHOICES strings from main.py.
     Returns: float mean training loss for the epoch.
     """
     model.train()
@@ -62,6 +62,55 @@ def train_one_epoch(model, dataloader, optimizer, device, lambda_l1, model_type,
                 if dense_mask.numel() > 0:
                     loss = loss + lambda_l1 * dense_mask.abs().mean()
 
+        # ── Pinterest base (no mask, unmasked control) ──────────────────────
+        elif model_type == 'pinterest_base':
+            pos_scores     = model(user_row, pos_item_col, user_ids)
+            all_neg_scores = model(user_row_tiled, neg_cols_stacked, user_ids_tiled)
+            neg_scores     = all_neg_scores.view(num_negatives, B).t()
+            loss           = bpr_loss(pos_scores, neg_scores)
+
+        # ── Pinterest base + RP-UCB (user-side mask) ────────────────────────
+        elif model_type in ('pinterest_base_rpucb', 'pinterest_base_rpucb_kd'):
+            pos_scores, pos_mask = model(user_row, pos_item_col, user_ids)
+            all_neg_scores, _   = model(user_row_tiled, neg_cols_stacked, user_ids_tiled)
+            neg_scores = all_neg_scores.view(num_negatives, B).t()
+            loss       = bpr_loss(pos_scores, neg_scores)
+
+            if lambda_l1 > 0 and pos_mask is not None:
+                N_u = model.user_counts[user_ids].float()
+                dense_mask = pos_mask[N_u >= model.n_bar]
+                if dense_mask.numel() > 0:
+                    loss = loss + lambda_l1 * dense_mask.abs().mean()
+
+        # ── Pinterest DCM family (argmax condition association, Sec 3.2.3) ──
+        elif model_type in ('pinterest_dcm', 'pinterest_dcm_rpucb'):
+            # Positive: score against all K conditions, pick argmax
+            pos_scores_k, _ = model.score_multi(user_row, pos_item_col, user_ids)  # [B, K]
+            j_star = pos_scores_k.argmax(dim=1)                                   # [B]
+            pos_scores = pos_scores_k[torch.arange(B, device=device), j_star]     # [B]
+
+            # Negatives: score against all K conditions, select j*-th only
+            # (paper Sec 3.2.3: "we only use o_u^{j*} to compute the
+            # similarity for negative samples for computational efficiency")
+            all_neg_scores_k, _ = model.score_multi(
+                user_row_tiled, neg_cols_stacked, user_ids_tiled
+            )                                                     # [B*num_neg, K]
+            j_star_tiled = j_star.repeat(num_negatives)           # [B*num_neg]
+            all_neg_scores = all_neg_scores_k[
+                torch.arange(B * num_negatives, device=device), j_star_tiled
+            ]                                                     # [B*num_neg]
+            neg_scores = all_neg_scores.view(num_negatives, B).t()  # [B, num_neg]
+
+            loss = bpr_loss(pos_scores, neg_scores)
+
+            # L1 on per-(user,k) masks for the DCM+RPUCB stretch variant
+            if model_type == 'pinterest_dcm_rpucb' and lambda_l1 > 0:
+                masks = model.get_condition_masks(user_ids)       # [B, K, d]
+                N_u = model.user_counts[user_ids].float()
+                dense_idx = N_u >= model.n_bar
+                if dense_idx.any():
+                    loss = loss + lambda_l1 * masks[dense_idx].abs().mean()
+
         # ── Models with user-side masking only (static_mask, rpucb_attn) ────
         else:
             pos_scores, pos_mask = model(user_row, pos_item_col, user_ids)
@@ -106,6 +155,8 @@ def train_model(model, dataset, config, device, run_id=0):
 
     best_hr   = 0.0
     best_ndcg = 0.0
+    best_coverage = 0.0
+    best_diversity = 0.0
     epoch_logs = []
 
     # Pre-load matrices to GPU to bypass PCIe bottleneck
@@ -125,12 +176,17 @@ def train_model(model, dataset, config, device, run_id=0):
 
         hr   = eval_results['HR@10']
         ndcg = eval_results['NDCG@10']
+        coverage  = eval_results.get('Coverage@10', 0.0)
+        diversity = eval_results.get('ILD@10', 0.0)
 
         if hr   > best_hr:   best_hr   = hr
         if ndcg > best_ndcg: best_ndcg = ndcg
+        if coverage  > best_coverage:  best_coverage  = coverage
+        if diversity > best_diversity: best_diversity = diversity
 
         print(f"Epoch {epoch+1:02d}/{config['epochs']} | "
-              f"Loss: {train_loss:.4f} | HR@10: {hr:.4f} | NDCG@10: {ndcg:.4f}")
+              f"Loss: {train_loss:.4f} | HR@10: {hr:.4f} | NDCG@10: {ndcg:.4f} | "
+              f"Cov: {coverage:.4f} | ILD: {diversity:.4f}")
         scheduler.step()
 
         epoch_logs.append({
@@ -138,10 +194,14 @@ def train_model(model, dataset, config, device, run_id=0):
             'train_loss': train_loss,
             'hr':         hr,
             'ndcg':       ndcg,
+            'coverage':   coverage,
+            'ild':        diversity,
         })
 
     return {
-        'best_hr':    best_hr,
-        'best_ndcg':  best_ndcg,
-        'epoch_logs': epoch_logs,
+        'best_hr':        best_hr,
+        'best_ndcg':      best_ndcg,
+        'best_coverage':  best_coverage,
+        'best_diversity': best_diversity,
+        'epoch_logs':     epoch_logs,
     }

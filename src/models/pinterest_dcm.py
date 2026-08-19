@@ -132,14 +132,29 @@ class PinterestDCM(BaseCF):
         return e, mask
 
     def get_user_conditions(self, user_ids):
-        """Final K condition embeddings per user: [B, K, d]."""
-        item_embeds, mask = self._history_item_embeds(user_ids)
-        centroids, _ = self.dcm(item_embeds, mask)                # [B, K, d]
+        """
+        Final K condition embeddings for `user_ids`: [B, K, d].
 
-        B = centroids.size(0)
-        flat = centroids.reshape(B * self.K, self.embed_dim)
-        crossed = self.condition_cross(flat).view(B, self.K, self.embed_dim)
-        return crossed
+        Deduplicates internally before running DCM routing, then gathers
+        the result back to the requested batch shape. This matters a lot
+        in practice, not just in theory: the same user_id appears once per
+        *candidate item* during evaluation (up to 100x per user) and once
+        per *negative sample* during training (up to num_negatives x per
+        user) -- naive per-row computation would redundantly re-run the
+        same user's full routing pipeline for every duplicate, which at
+        eval batch scale (hundreds of unique users x 100 candidates each)
+        is enough to exhaust memory outright, not just waste compute.
+        """
+        unique_ids, inverse = torch.unique(user_ids, return_inverse=True)
+
+        item_embeds, mask = self._history_item_embeds(unique_ids)
+        centroids, _ = self.dcm(item_embeds, mask)                # [U, K, d]
+
+        U = centroids.size(0)
+        flat = centroids.reshape(U * self.K, self.embed_dim)
+        crossed = self.condition_cross(flat).view(U, self.K, self.embed_dim)  # [U, K, d]
+
+        return crossed[inverse]                                   # [B, K, d]
 
     def score_multi(self, user_row, item_col, user_ids, item_ids=None):
         """

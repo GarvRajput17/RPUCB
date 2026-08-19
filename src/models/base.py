@@ -31,6 +31,11 @@ class BaseCF(nn.Module):
 
     def score_with_mask(self, user_row, item_col, user_ids):
         return self.score(user_row, item_col, user_ids), None
+
+    def score_multi(self, user_row, item_col, user_ids, item_ids=None):
+        """For K-embedding models: returns (scores_per_k [B, K], conditions).
+        Default: wraps score() as a single-column K=1 tensor."""
+        return self.score(user_row, item_col, user_ids).unsqueeze(1), None
     
     def init_weights(self):
         for m in self.modules():

@@ -3,15 +3,24 @@ import json
 import numpy as np
 
 # ── Canonical model list ──────────────────────────────────────────────────────
-ALL_MODELS = ['deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full']
+ALL_MODELS = [
+    'deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full',
+    'pinterest_base', 'pinterest_base_rpucb', 'pinterest_base_rpucb_kd',
+    'pinterest_dcm', 'pinterest_dcm_rpucb',
+]
 ALL_DATASETS = ['ml-1m', 'AMusic', 'citeulike']
 
 MODEL_DISPLAY = {
-    'deepcf':          'DeepCF',
-    'static_mask':     'DeepCF + Static Mask + Attn',
-    'rpucb':           'DeepCF + RP-UCB (User+Item)',
-    'rpucb_attn':      'RP-UCB + Attn (User only)',
-    'rpucb_attn_full': 'RP-UCB + Attn (User+Item)',
+    'deepcf':                   'DeepCF',
+    'static_mask':              'DeepCF + Static Mask + Attn',
+    'rpucb':                    'DeepCF + RP-UCB (User+Item)',
+    'rpucb_attn':               'RP-UCB + Attn (User only)',
+    'rpucb_attn_full':          'RP-UCB + Attn (User+Item)',
+    'pinterest_base':           'Pinterest Tower (control)',
+    'pinterest_base_rpucb':     'Pinterest + RP-UCB (d)',
+    'pinterest_base_rpucb_kd':  'Pinterest + RP-UCB (K·d)',
+    'pinterest_dcm':            'Pinterest DCM (K=7)',
+    'pinterest_dcm_rpucb':      'Pinterest DCM + RP-UCB',
 }
 
 DATASET_DISPLAY = {
@@ -32,16 +41,24 @@ def save_results(results, dataset_name, model_name, config=None):
     """
     hrs   = [res['best_hr']   for res in results]
     ndcgs = [res['best_ndcg'] for res in results]
+    coverages  = [res.get('best_coverage', 0.0) for res in results]
+    diversities = [res.get('best_diversity', 0.0) for res in results]
 
     mean_hr   = float(np.mean(hrs))
     std_hr    = float(np.std(hrs))
     mean_ndcg = float(np.mean(ndcgs))
     std_ndcg  = float(np.std(ndcgs))
+    mean_cov  = float(np.mean(coverages))
+    std_cov   = float(np.std(coverages))
+    mean_ild  = float(np.mean(diversities))
+    std_ild   = float(np.std(diversities))
 
     display = MODEL_DISPLAY.get(model_name, model_name)
     print(f"\nResults for {display} on {dataset_name} over {len(results)} runs:")
     print(f"HR@10:   {mean_hr:.4f} ± {std_hr:.4f}")
-    print(f"NDCG@10: {mean_ndcg:.4f} ± {std_ndcg:.4f}\n")
+    print(f"NDCG@10: {mean_ndcg:.4f} ± {std_ndcg:.4f}")
+    print(f"Cov@10:  {mean_cov:.4f} ± {std_cov:.4f}")
+    print(f"ILD@10:  {mean_ild:.4f} ± {std_ild:.4f}\n")
 
     out_file = f"results/{dataset_name}_{model_name}_results.json"
     os.makedirs('results', exist_ok=True)
@@ -54,6 +71,10 @@ def save_results(results, dataset_name, model_name, config=None):
         'std_hr':     std_hr,
         'mean_ndcg':  mean_ndcg,
         'std_ndcg':   std_ndcg,
+        'mean_cov':   mean_cov,
+        'std_cov':    std_cov,
+        'mean_ild':   mean_ild,
+        'std_ild':    std_ild,
         'runs':       results,
     }
     if config is not None:

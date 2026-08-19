@@ -1,0 +1,26 @@
+dataset: AMusic
+data_path: data/AMusic
+num_negatives: 2          # was 8 — cuts DCM's per-step history-embedding recompute ~4x
+batch_size: 64
+epochs: 2                 # was 12 — just enough to confirm loss moves, not to converge
+lr: 0.001
+embed_dim: 64
+rl_layers: [256, 128, 64] # unused by the Pinterest-family models; kept small, harmless
+ml_layers: [256, 128, 64]
+attn_heads: 2
+attn_dim: 64
+lambda_l1: 0.0001
+dropout: 0.0
+seed: 42
+
+# Pinterest-family settings — scaled down for a fast laptop sanity run.
+# NOT what Stage C's real run should use (see run_all.sh / dataset configs
+# for the locked K=7, max_hist_len=50 settings) -- this file exists only to
+# make one pass through the pipeline fast, not to produce meaningful metrics.
+K: 3                   # was 7
+max_hist_len: 15        # was 50
+summarization_hidden: 64   # was 256
+n_fields: 4
+n_heads_dhen: 1          # was 2
+transformer_layers: 1    # was 2
+routing_iters: 2         # was 3

@@ -27,19 +27,34 @@ class PinterestBaseRPUCB(BaseCF):
     left unmasked. This also happens to be the more architecturally
     faithful choice: Pinterest itself never applies any masking mechanism
     to the item tower either.
+
+    `item_embed_dim` (new): the item tower's TRUE dimensionality, held
+    fixed at the base `d` regardless of what `embed_dim` (the user side)
+    is set to. This matters specifically for the `K*d` run: without this,
+    the item tower would also balloon to `K*d`, silently giving this model
+    extra item-side capacity that pinterest_dcm.py's item tower (fixed at
+    `d`, per Pinterest's own "item tower stays single-embedding" design)
+    never gets -- confounding the matched-user-capacity comparison the
+    gameplan's target table depends on. When `item_embed_dim != embed_dim`,
+    a linear projection brings the item embedding up to the shared
+    interaction dimension -- a dimension *match*, not a capacity increase;
+    the item tower's actual representational bottleneck stays at `d`.
     """
 
-    def __init__(self, num_users, num_items, embed_dim=64,
+    def __init__(self, num_users, num_items, embed_dim=64, item_embed_dim=None,
                  summarization_hidden=256, n_fields=4, n_heads_dhen=2,
                  transformer_layers=2, attn_heads=2, dropout=0.0,
                  user_interaction_counts=None, gamma_init=2.0, beta=1.0):
         super().__init__()
+        item_embed_dim = item_embed_dim or embed_dim
+
         self.num_users = num_users
         self.num_items = num_items
         self.embed_dim = embed_dim
+        self.item_embed_dim = item_embed_dim
         self.beta = beta
 
-        # ── RP-UCB: user side only ──────────────────────────────────
+        # ── RP-UCB: user side only (mask lives in the wide, user-side dim) ──
         self.mask_embeddings = nn.Embedding(num_users, embed_dim)
         self.gamma = nn.Parameter(torch.full((embed_dim,), float(gamma_init)))
 
@@ -56,10 +71,17 @@ class PinterestBaseRPUCB(BaseCF):
             dropout=dropout,
         )
         self.item_tower = PinterestTower(
-            input_dim=num_users, embed_dim=embed_dim,
+            input_dim=num_users, embed_dim=item_embed_dim,
             summarization_hidden=summarization_hidden, n_fields=n_fields,
             n_heads=n_heads_dhen, transformer_layers=transformer_layers,
             dropout=dropout,
+        )
+        # Dimension-match only (see docstring) -- Identity when the item
+        # tower is already at the shared width (embed_dim == item_embed_dim,
+        # true for every model except pinterest_base_rpucb_kd).
+        self.item_proj = (
+            nn.Linear(item_embed_dim, embed_dim)
+            if item_embed_dim != embed_dim else nn.Identity()
         )
 
         self.interaction = SelfAttentionInteraction(
@@ -93,8 +115,8 @@ class PinterestBaseRPUCB(BaseCF):
     def score_with_mask(self, user_row, item_col, user_ids, item_ids=None):
         mask = self.get_mask(user_ids)                # [B, d]
 
-        p_u = self.user_tower(user_row)                # [B, d]
-        q_i = self.item_tower(item_col)                # [B, d]
+        p_u = self.user_tower(user_row)                # [B, embed_dim]
+        q_i = self.item_proj(self.item_tower(item_col))  # [B, item_embed_dim] -> [B, embed_dim]
         p_u_masked = p_u * mask
 
         z = self.interaction(p_u_masked, q_i)          # [B, 2d]

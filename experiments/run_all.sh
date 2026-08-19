@@ -3,8 +3,10 @@ set -e
 
 DEVICE=${1:-cpu}  # Pass 'cuda' as first arg to use GPU
 
-# ── 5 models x 3 datasets = 15 experiment combos ────────────────────────────
-MODELS="deepcf static_mask rpucb rpucb_attn rpucb_attn_full"
+# ── 10 models x 3 datasets = 30 experiment combos ───────────────────────────
+# Ordered per gameplan §5: existing models first, then controls, then core
+# rows, then stretch -- if compute runs out, the stretch row drops first.
+MODELS="deepcf static_mask rpucb rpucb_attn rpucb_attn_full pinterest_base pinterest_base_rpucb pinterest_base_rpucb_kd pinterest_dcm pinterest_dcm_rpucb"
 DATASETS="ml-1m AMusic citeulike"
 
 for dataset in $DATASETS; do
