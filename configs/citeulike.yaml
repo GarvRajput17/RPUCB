@@ -2,7 +2,7 @@ dataset: citeulike
 data_path: data/citeulike
 num_negatives: 8
 batch_size: 256
-epochs: 10
+epochs: 25
 lr: 0.001
 embed_dim: 64
 rl_layers: [1024, 512, 64]      # citeulike has many items; same adjustment
