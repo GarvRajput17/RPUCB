@@ -1,0 +1,12 @@
+# ml-1m -- densest of the five (95.53%), and the only one where a typical
+# user's history exceeds max_hist_len, so the routing bag is a seeded sample
+# rather than the full history for most users.
+dataset: ml-1m
+data_path: data/ml-1m
+batch_size: 1024
+
+expected_stats:
+  users: 6040
+  items: 3706
+  interactions: 1000209
+  sparsity: 95.53

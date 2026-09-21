@@ -1,0 +1,4 @@
+# Model 7 -- unmasked Pinterest DCM control, K=7 fixed (Pinterest Table 6).
+# Loss: sampled softmax + logQ (§3). The logQ term is exactly inert under
+# uniform negative sampling and is implemented for fidelity (§9).
+model: dcm

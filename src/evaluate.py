@@ -1,116 +1,132 @@
+"""
+Full-catalog evaluation: val mode (cheap, per-epoch, seeded subsample) and
+test mode (expensive, all users, run exactly once on the restored-best
+checkpoint) -- §5's eval-cost control.
+
+Replaces the pre-refactor `evaluate_model`, which ranked the held-out item
+against 99 sampled negatives. Two consequences of that protocol explain
+why the numbers move once this lands (Phase 3's gate): with 100 total
+candidates HR@100 was identically 1.0 for every model regardless of
+quality, and Coverage@10 was the union of top-10 items drawn from those
+100-item pools rather than from the real catalog.
+
+Scoring goes through the encode/score_encoded contract (models/base.py),
+not the pairwise `forward()`. The pairwise path consumes raw interaction
+profiles -- `num_items + num_users` floats per (user, item) pair -- so
+tiling it across a whole catalog materialises 9-39 GB per chunk depending
+on dataset. Encoding each side once and combining at d=64 removes that,
+and lets the item encoding be computed **once per evaluation** and reused
+across every user batch, rather than recomputed per batch.
+
+No per-model branching anywhere in this file: each family supplies its own
+encoders and its own `score_encoded`, including the max-over-K reduction
+(§5) where it applies.
+"""
+
 import torch
-import torch.nn.functional as F
-import math
+
+from .metrics import FullCatalogMetrics
+from .models.base import DEFAULT_ITEM_ENCODE_CHUNK, DEFAULT_PAIR_CHUNK
 
 
-def evaluate_model(model, test_ratings, test_negatives, dataset, device, K=10,
-                   interaction_rows_gpu=None, interaction_cols_gpu=None):
+@torch.no_grad()
+def encode_catalog(model, dataset, device, item_cols=None,
+                   item_chunk_size=DEFAULT_ITEM_ENCODE_CHUNK):
     """
-    Leave-one-out evaluation with HR@K, NDCG@K, catalog coverage, and
-    intra-list diversity (ILD).
+    Item-side representation for the entire catalog.
 
-    Coverage@K : fraction of the item catalog that appears in *any* user's
-                 top-K list across the test set.
-    ILD@K      : mean intra-list diversity, defined as the average pairwise
-                 cosine *distance* (1 - cosine_sim) among items in each
-                 user's top-K, averaged across users. Uses the raw
-                 interaction_cols vectors (metadata-free, identical across
-                 all three datasets -- gameplan Fork 6's locked decision).
+    Must be recomputed every time the weights change, so this is called
+    once per `evaluate_split`, not cached across epochs.
     """
+    cols = item_cols if item_cols is not None else dataset.interaction_cols.to(device)
+    item_ids = torch.arange(dataset.num_items, device=device)
+    return model.encode_items(cols, item_ids, chunk_size=item_chunk_size)
+
+
+def _apply_exclusions(scores, batch, dataset, split, device):
+    """
+    Mask each user's train items -- plus whichever of {val, test} is not
+    the current target -- to -inf, in one scatter per batch rather than
+    one small CUDA transfer per user.
+    """
+    rows, cols = [], []
+    for row, (user, target) in enumerate(batch):
+        excluded = dataset.excluded_items(user, split)
+        if not excluded:
+            continue
+        assert target not in excluded, (
+            f"held-out {split} item {target} for user {user} is in its own "
+            f"exclusion set; the split carving in data/dataset.py is wrong"
+        )
+        rows.extend([row] * len(excluded))
+        cols.extend(excluded)
+
+    if rows:
+        scores[
+            torch.tensor(rows, dtype=torch.long, device=device),
+            torch.tensor(cols, dtype=torch.long, device=device),
+        ] = float("-inf")
+
+
+@torch.no_grad()
+def evaluate_split(
+    model, dataset, split, device, max_users=None, seed=None,
+    item_vectors="auto", user_batch_size=64,
+    item_chunk_size=DEFAULT_ITEM_ENCODE_CHUNK,
+    pair_chunk=DEFAULT_PAIR_CHUNK,
+    interaction_rows_gpu=None, interaction_cols_gpu=None,
+):
+    """
+    Args:
+        split: 'val' or 'test'.
+        max_users: seeded random subsample of this size, for the cheap
+            per-epoch val check (§5's fixed 1,000-user subsample). None
+            means every user, used for the single test pass.
+        item_vectors: 'auto' uses `dataset.interaction_cols` for ILD --
+            metadata-free and identically defined across all five
+            datasets, which is what makes ILD comparable between them
+            (§9). None skips ILD.
+        interaction_rows_gpu / interaction_cols_gpu: tensors the caller
+            already has resident. `train.py` preloads both once per run,
+            so val evaluation does not re-transfer the full interaction
+            matrices on every epoch.
+    """
+    if split not in ("val", "test"):
+        raise ValueError(f"split must be 'val' or 'test', got {split!r}")
+
     model.eval()
 
-    if interaction_rows_gpu is None:
-        interaction_rows_gpu = dataset.interaction_rows.to(device)
-    if interaction_cols_gpu is None:
-        interaction_cols_gpu = dataset.interaction_cols.to(device)
+    ratings = dataset.get_val_data() if split == "val" else dataset.get_test_data()
+    if max_users is not None and len(ratings) > max_users:
+        generator = torch.Generator().manual_seed(seed if seed is not None else 0)
+        idx = torch.randperm(len(ratings), generator=generator)[:max_users].tolist()
+        ratings = [ratings[i] for i in idx]
 
-    hr_list   = []
-    ndcg_list = []
-    ild_list  = []
-    all_topk_items = set()
+    rows = (
+        interaction_rows_gpu if interaction_rows_gpu is not None
+        else dataset.interaction_rows.to(device)
+    )
+    cols = (
+        interaction_cols_gpu if interaction_cols_gpu is not None
+        else dataset.interaction_cols.to(device)
+    )
 
-    with torch.no_grad():
-        eval_batch_size = 512
-        for i in range(0, len(test_ratings), eval_batch_size):
-            batch_ratings = test_ratings[i:i + eval_batch_size]
+    # Once per evaluation, reused by every user batch below.
+    item_enc = encode_catalog(model, dataset, device, item_cols=cols,
+                              item_chunk_size=item_chunk_size)
 
-            all_user_rows  = []
-            all_item_cols  = []
-            all_user_ids   = []
-            all_item_ids   = []
-            batch_candidates = []   # track candidate IDs per user for coverage
+    vectors = cols if item_vectors == "auto" else item_vectors
+    acc = FullCatalogMetrics(dataset.num_items, item_vectors=vectors)
 
-            for u, pos_item in batch_ratings:
-                neg_items   = test_negatives[u]
-                candidates  = [pos_item] + neg_items
-                num_cands   = len(candidates)
-                batch_candidates.append(candidates)
+    for start in range(0, len(ratings), user_batch_size):
+        batch = ratings[start:start + user_batch_size]
+        user_ids = torch.tensor([u for u, _ in batch], dtype=torch.long, device=device)
+        positives = torch.tensor([i for _, i in batch], dtype=torch.long, device=device)
 
-                all_user_rows.append(
-                    interaction_rows_gpu[u].unsqueeze(0).expand(num_cands, -1)
-                )
-                all_item_cols.append(interaction_cols_gpu[candidates])
-                all_user_ids.extend([u] * num_cands)
-                all_item_ids.extend(candidates)
+        user_enc = model.encode_users(rows[user_ids], user_ids)
+        scores = model.score_encoded(user_enc, item_enc, pair_chunk=pair_chunk)
 
-            batch_user_rows = torch.cat(all_user_rows, dim=0)
-            batch_item_cols = torch.cat(all_item_cols, dim=0)
-            batch_user_ids  = torch.LongTensor(all_user_ids).to(device)
-            batch_item_ids  = torch.LongTensor(all_item_ids).to(device)
+        _apply_exclusions(scores, batch, dataset, split, device)
+        acc.update(scores, positives)
 
-            # ── Forward pass ────────────────────────────────────────────────
-            scores = model(batch_user_rows, batch_item_cols,
-                           batch_user_ids, batch_item_ids)
-            if isinstance(scores, tuple):
-                scores = scores[0]
-
-            scores = scores.cpu()
-
-            # ── Process per-user ─────────────────────────────────────────────
-            idx = 0
-            for bi in range(len(batch_ratings)):
-                candidates = batch_candidates[bi]
-                num_cands = len(candidates)
-                user_scores = scores[idx:idx + num_cands]
-                idx += num_cands
-
-                # HR / NDCG (existing logic)
-                pos_score = user_scores[0]
-                rank      = 1 + (user_scores[1:] > pos_score).sum().item()
-
-                if rank <= K:
-                    hr_list.append(1.0)
-                    ndcg_list.append(1.0 / math.log2(rank + 1.0))
-                else:
-                    hr_list.append(0.0)
-                    ndcg_list.append(0.0)
-
-                # Top-K items for coverage and diversity
-                _, topk_idx = torch.topk(user_scores, min(K, num_cands))
-                topk_items = [candidates[j] for j in topk_idx.tolist()]
-                all_topk_items.update(topk_items)
-
-                # Intra-list diversity (ILD)
-                if len(topk_items) >= 2:
-                    item_ids_t = torch.LongTensor(topk_items).to(device)
-                    vecs = interaction_cols_gpu[item_ids_t]             # [K, num_users]
-                    vecs = F.normalize(vecs.float(), dim=-1)
-                    sim = vecs @ vecs.t()                              # [K, K]
-                    n = sim.size(0)
-                    mask = 1.0 - torch.eye(n, device=sim.device)
-                    avg_sim = (sim * mask).sum() / (n * (n - 1))
-                    ild_list.append((1.0 - avg_sim).item())
-                else:
-                    ild_list.append(0.0)
-
-    hr_mean   = sum(hr_list)   / len(hr_list)   if hr_list   else 0.0
-    ndcg_mean = sum(ndcg_list) / len(ndcg_list) if ndcg_list else 0.0
-    ild_mean  = sum(ild_list)  / len(ild_list)  if ild_list  else 0.0
-    coverage  = len(all_topk_items) / dataset.num_items if dataset.num_items > 0 else 0.0
-
-    return {
-        'HR@10':       hr_mean,
-        'NDCG@10':     ndcg_mean,
-        'Coverage@10': coverage,
-        'ILD@10':      ild_mean,
-    }
+    return acc.compute()

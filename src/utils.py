@@ -1,114 +1,185 @@
-import os
-import json
-import numpy as np
+"""
+Result persistence, aggregation, the 5-metric table, and significance
+tests (§7).
 
-# ── Canonical model list ──────────────────────────────────────────────────────
+Storage layout: `results/{dataset}/{model}/seed{seed}.json`, mirroring
+`checkpoints/{dataset}/{model}/seed{seed}/best.pt`, so `--skip-existing`
+works at seed granularity.
+"""
+
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+from scipy import stats
+
 ALL_MODELS = [
-    'deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full',
-    'pinterest_base', 'pinterest_base_rpucb', 'pinterest_base_rpucb_kd',
-    'pinterest_dcm', 'pinterest_dcm_rpucb',
+    "deepcf", "deepcf_rpucb", "deepcf_rpucb_attn",
+    "mind", "mind_rpucb_multi", "mind_rpucb",
+    "dcm", "dcm_rpucb_multi", "dcm_rpucb_kd", "dcm_rpucb_d",
 ]
-ALL_DATASETS = ['ml-1m', 'AMusic', 'citeulike']
+
+ALL_DATASETS = ["ml-1m", "lastfm", "citeulike-a", "AMusic", "AToy"]
+
+ALL_METRICS = ["HR@10", "HR@100", "NDCG@10", "Coverage@10", "ILD@10"]
 
 MODEL_DISPLAY = {
-    'deepcf':                   'DeepCF',
-    'static_mask':              'DeepCF + Static Mask + Attn',
-    'rpucb':                    'DeepCF + RP-UCB (User+Item)',
-    'rpucb_attn':               'RP-UCB + Attn (User only)',
-    'rpucb_attn_full':          'RP-UCB + Attn (User+Item)',
-    'pinterest_base':           'Pinterest Tower (control)',
-    'pinterest_base_rpucb':     'Pinterest + RP-UCB (d)',
-    'pinterest_base_rpucb_kd':  'Pinterest + RP-UCB (K·d)',
-    'pinterest_dcm':            'Pinterest DCM (K=7)',
-    'pinterest_dcm_rpucb':      'Pinterest DCM + RP-UCB',
+    "deepcf":            "DeepCF",
+    "deepcf_rpucb":      "DeepCF + RP-UCB",
+    "deepcf_rpucb_attn": "DeepCF + RP-UCB + Attn",
+    "mind":              "MIND",
+    "mind_rpucb_multi":  "MIND + RP-UCB (multi)",
+    "mind_rpucb":        "MIND + RP-UCB (K=1)",
+    "dcm":               "Pinterest DCM (K=7)",
+    "dcm_rpucb_multi":   "DCM + RP-UCB (7 heads)",
+    "dcm_rpucb_kd":      "DCM + RP-UCB (K*d)",
+    "dcm_rpucb_d":       "DCM + RP-UCB (d)",
+    "dcm_rpucb_shared":  "DCM + RP-UCB (shared mask)",
 }
 
-DATASET_DISPLAY = {
-    'ml-1m':     'ML-1M',
-    'AMusic':    'AMusic',
-    'citeulike': 'CiteULike',
-}
+# §2's "comparison structure" table, encoded directly.
+COMPARISONS = [
+    ("deepcf",           "deepcf_rpucb",      "pure mask effect (DeepCF)"),
+    ("deepcf_rpucb",     "deepcf_rpucb_attn", "pure attention effect (DeepCF)"),
+    ("deepcf",           "deepcf_rpucb_attn", "combined mask+attention (DeepCF)"),
+    ("mind",             "mind_rpucb_multi",  "pure mask effect (MIND)"),
+    ("mind_rpucb_multi", "mind_rpucb",        "architecture+capacity effect (MIND)"),
+    ("mind",             "mind_rpucb",        "headline efficiency (MIND)"),
+    ("dcm",              "dcm_rpucb_multi",   "pure mask effect (DCM)"),
+    ("dcm_rpucb_multi",  "dcm_rpucb_kd",      "pure architecture effect (DCM)"),
+    ("dcm_rpucb_kd",     "dcm_rpucb_d",       "capacity effect (DCM)"),
+    ("dcm",              "dcm_rpucb_kd",      "headline: K heads vs 1 gated embedding (DCM)"),
+    ("dcm",              "dcm_rpucb_d",       "RP-UCB vs multi-interest at 1/7 capacity (DCM)"),
+]
 
 
-def save_results(results, dataset_name, model_name, config=None):
-    """
-    Saves per-run and aggregated results to results/{dataset}_{model}_results.json
+def _seed_path(dataset_name, model_name, seed, root):
+    return Path(root) / dataset_name / model_name / f"seed{seed}.json"
 
-    results: list of dicts, one per run, each with:
-        - 'best_hr'   : float
-        - 'best_ndcg' : float
-        - 'epoch_logs': list of {epoch, train_loss, hr, ndcg}
-    """
-    hrs   = [res['best_hr']   for res in results]
-    ndcgs = [res['best_ndcg'] for res in results]
-    coverages  = [res.get('best_coverage', 0.0) for res in results]
-    diversities = [res.get('best_diversity', 0.0) for res in results]
 
-    mean_hr   = float(np.mean(hrs))
-    std_hr    = float(np.std(hrs))
-    mean_ndcg = float(np.mean(ndcgs))
-    std_ndcg  = float(np.std(ndcgs))
-    mean_cov  = float(np.mean(coverages))
-    std_cov   = float(np.std(coverages))
-    mean_ild  = float(np.mean(diversities))
-    std_ild   = float(np.std(diversities))
+def run_result_exists(dataset_name, model_name, seed, root="results"):
+    p = _seed_path(dataset_name, model_name, seed, root)
+    return p.is_file() and p.stat().st_size > 0
 
-    display = MODEL_DISPLAY.get(model_name, model_name)
-    print(f"\nResults for {display} on {dataset_name} over {len(results)} runs:")
-    print(f"HR@10:   {mean_hr:.4f} ± {std_hr:.4f}")
-    print(f"NDCG@10: {mean_ndcg:.4f} ± {std_ndcg:.4f}")
-    print(f"Cov@10:  {mean_cov:.4f} ± {std_cov:.4f}")
-    print(f"ILD@10:  {mean_ild:.4f} ± {std_ild:.4f}\n")
 
-    out_file = f"results/{dataset_name}_{model_name}_results.json"
-    os.makedirs('results', exist_ok=True)
+def save_run_result(result, dataset_name, model_name, seed, config=None,
+                     provenance=None, root="results"):
+    """`result` is train_model's return value."""
+    path = _seed_path(dataset_name, model_name, seed, root)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    out_dict = {
-        'model':      model_name,
-        'dataset':    dataset_name,
-        'num_runs':   len(results),
-        'mean_hr':    mean_hr,
-        'std_hr':     std_hr,
-        'mean_ndcg':  mean_ndcg,
-        'std_ndcg':   std_ndcg,
-        'mean_cov':   mean_cov,
-        'std_cov':    std_cov,
-        'mean_ild':   mean_ild,
-        'std_ild':    std_ild,
-        'runs':       results,
-    }
+    payload = dict(result)
+    payload["dataset"] = dataset_name
+    payload["model"] = model_name
+    payload["seed"] = seed
     if config is not None:
-        out_dict['config'] = config
+        payload["config"] = config
+    if provenance is not None:
+        payload["provenance"] = provenance
 
-    with open(out_file, 'w') as f:
-        json.dump(out_dict, f, indent=4)
+    tmp = path.with_suffix(".json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, path)
+
+    hr10 = result["test_metrics"].get("HR@10", float("nan"))
+    print(f"Saved {path} (test HR@10={hr10:.4f})")
 
 
-def print_results_table():
-    print("\n--- Final Results Table ---")
+def _load_seed_results(dataset_name, model_name, root="results"):
+    d = Path(root) / dataset_name / model_name
+    if not d.is_dir():
+        return []
+    out = []
+    for p in sorted(d.glob("seed*.json")):
+        with open(p) as f:
+            out.append(json.load(f))
+    return out
 
-    # Build header
-    header = f"{'Model':<30}"
-    for ds in ALL_DATASETS:
-        name = DATASET_DISPLAY.get(ds, ds)
-        header += f"| {name} HR@10 | {name} NDCG@10 "
-    print(header)
-    print("-" * len(header))
 
-    for model in ALL_MODELS:
-        row = f"{MODEL_DISPLAY[model]:<30}"
-        for ds in ALL_DATASETS:
-            file_path = f"results/{ds}_{model}_results.json"
-            if os.path.exists(file_path):
-                with open(file_path, 'r') as f:
-                    data = json.load(f)
-                hr_str   = f"{data['mean_hr']:.4f}±{data['std_hr']:.4f}"
-                ndcg_str = f"{data['mean_ndcg']:.4f}±{data['std_ndcg']:.4f}"
-            else:
-                hr_str   = "    ---    "
-                ndcg_str = "    ---    "
+def aggregate_results(dataset_name, model_name, root="results"):
+    """Mean/std of each of the 5 test metrics across however many seed
+    files exist. Returns None if none exist yet."""
+    runs = _load_seed_results(dataset_name, model_name, root)
+    if not runs:
+        return None
 
-            row += f"| {hr_str:<13} | {ndcg_str:<16}"
-        print(row)
+    out = {"num_seeds": len(runs)}
+    for metric in ALL_METRICS:
+        values = [r["test_metrics"][metric] for r in runs if metric in r["test_metrics"]]
+        if values:
+            out[f"mean_{metric}"] = float(np.mean(values))
+            out[f"std_{metric}"] = float(np.std(values))
+    return out
 
-    print("\nValues reported as: mean ± std over independent runs")
+
+def print_results_table(models=ALL_MODELS, datasets=ALL_DATASETS,
+                         metrics=ALL_METRICS, root="results"):
+    """One table per metric, rows=models, columns=datasets. Missing cells
+    print as '---' so a partially-run matrix stays legible."""
+    for metric in metrics:
+        header = f"{'Model':<28}" + "".join(f"| {d:<16}" for d in datasets)
+        print(f"\n--- {metric} (mean ± std across seeds) ---")
+        print(header)
+        print("-" * len(header))
+
+        for model in models:
+            row = f"{MODEL_DISPLAY.get(model, model):<28}"
+            for dataset in datasets:
+                agg = aggregate_results(dataset, model, root)
+                if agg and f"mean_{metric}" in agg:
+                    cell = f"{agg[f'mean_{metric}']:.4f}±{agg[f'std_{metric}']:.4f} (n={agg['num_seeds']})"
+                else:
+                    cell = "---"
+                row += f"| {cell:<16}"
+            print(row)
+
+
+def paired_ttest(dataset_name, model_a, model_b, metric="HR@10", root="results"):
+    """
+    Paired t-test on `metric`, paired by seed. Only seeds present for
+    BOTH models are used; returns None below 2 pairs. With the locked
+    protocol's 3 seeds this has very little power even at n=3 -- treat
+    p-values as suggestive, not confirmatory.
+    """
+    runs_a = {r["seed"]: r["test_metrics"].get(metric)
+              for r in _load_seed_results(dataset_name, model_a, root)}
+    runs_b = {r["seed"]: r["test_metrics"].get(metric)
+              for r in _load_seed_results(dataset_name, model_b, root)}
+
+    common = sorted(set(runs_a) & set(runs_b))
+    if len(common) < 2:
+        return None
+
+    a = np.array([runs_a[s] for s in common])
+    b = np.array([runs_b[s] for s in common])
+    t_stat, p_value = stats.ttest_rel(b, a)
+
+    return {
+        "n": len(common), "seeds": common,
+        "mean_baseline": float(a.mean()), "mean_variant": float(b.mean()),
+        "delta": float(b.mean() - a.mean()),
+        "t_stat": float(t_stat), "p_value": float(p_value),
+    }
+
+
+def run_all_significance_tests(datasets=ALL_DATASETS, metrics=("HR@10", "NDCG@10"),
+                                root="results"):
+    """Runs every §2 comparison, on every dataset, for the given metrics."""
+    results = []
+    for baseline, variant, label in COMPARISONS:
+        for dataset in datasets:
+            for metric in metrics:
+                r = paired_ttest(dataset, baseline, variant, metric, root)
+                if r is None:
+                    continue
+                r.update({"dataset": dataset, "metric": metric, "comparison": label,
+                          "baseline": baseline, "variant": variant})
+                results.append(r)
+                sig = "*" if r["p_value"] < 0.05 else " "
+                print(
+                    f"{sig} {dataset:<12} {metric:<10} {label:<45} "
+                    f"delta={r['delta']:+.4f}  p={r['p_value']:.4f}  n={r['n']}"
+                )
+    return results

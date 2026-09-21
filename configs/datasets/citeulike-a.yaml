@@ -1,0 +1,18 @@
+# citeulike-a -- the one dataset requiring real preprocessing from raw
+# users.dat (no pre-split release exists). Test split is fixed at seed 42 by
+# the preprocessing script and must not be re-drawn per run.
+#
+# Note: this file deliberately does NOT set beta. The pre-refactor
+# citeulike.yaml carried `beta: 0.05`, which silently made this one dataset
+# run a different exploration scale from the other four with nothing in the
+# results recording it. beta is now a per-family value in models/*.yaml, and
+# src/config.py rejects any dataset file that tries to set it.
+dataset: citeulike-a
+data_path: data/citeulike-a
+batch_size: 256
+
+expected_stats:
+  users: 5551
+  items: 16980
+  interactions: 204986
+  sparsity: 99.78

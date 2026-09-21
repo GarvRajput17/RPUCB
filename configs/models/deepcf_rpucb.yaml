@@ -1,0 +1,5 @@
+# Model 2 -- pure mask test for the DeepCF backbone: identical architecture
+# and capacity to model 1, differing only in the user and item masks.
+# beta is tuned on validation for the BCE family (§3).
+model: deepcf_rpucb
+beta: 1.0

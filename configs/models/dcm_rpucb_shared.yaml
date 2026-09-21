@@ -1,0 +1,8 @@
+# Not part of the 150-run matrix. §2 asks for a shared-mask DCM variant to be
+# available for a symmetric comparison against mind_rpucb_multi -- same
+# granularity on both backbones -- without adding a row to the main matrix.
+# Run explicitly when wanted; run_matrix.sh excludes it by default.
+model: dcm_rpucb_shared
+head_mode: per_slot
+mask_granularity: shared
+beta: 1.0

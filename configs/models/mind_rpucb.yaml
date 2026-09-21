@@ -1,0 +1,6 @@
+# Model 6 -- K=1 collapse. Routing degenerates to weighted pooling plus
+# squash and label-aware attention has a single slot, so describe this as
+# the MIND tower with one adaptively-masked embedding, not as multi-interest
+# (§2's design note).
+model: mind_rpucb
+beta: 1.0

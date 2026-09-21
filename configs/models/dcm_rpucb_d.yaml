@@ -1,0 +1,7 @@
+# Model 10 -- K=1 collapse at 1/7 the capacity. Interest machinery is inert
+# here, same as mind_rpucb (§2's design note).
+model: dcm_rpucb_d
+K: 1
+head_mode: per_slot
+mask_granularity: shared
+beta: 1.0

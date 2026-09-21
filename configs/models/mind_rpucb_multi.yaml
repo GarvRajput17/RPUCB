@@ -1,0 +1,6 @@
+# Model 5 -- pure mask test for the MIND backbone. Mask granularity is
+# shared-across-slots rather than per-slot, forced by adaptive K_u: there is
+# no fixed (user, k) table to index the way dcm_rpucb_multi has one (§9).
+model: mind_rpucb_multi
+adaptive_k: true
+beta: 1.0

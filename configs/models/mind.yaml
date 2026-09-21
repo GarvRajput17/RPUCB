@@ -1,0 +1,6 @@
+# Model 4 -- unmasked MIND control. Adaptive K_u = max(1, min(7, log2|I_u|));
+# with the history capped at 50, log2(50) ~ 5.64, so a typical user gets 5
+# interests rather than DCM's 7. That asymmetry is §5's writeup caveat.
+# Loss: sampled softmax, no logQ (§3).
+model: mind
+adaptive_k: true

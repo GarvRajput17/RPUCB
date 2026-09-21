@@ -1,0 +1,8 @@
+# Model 9 -- one wide masked embedding. The seven conditions concatenate to
+# 448, take a single 448-dim mask, then project back to 64 to meet the item
+# tower (which stays at d across all four DCM models, so this row does not
+# smuggle in an item-side capacity change). Isolates head architecture with
+# mask and capacity both fixed against model 8.
+model: dcm_rpucb_kd
+head_mode: concat
+beta: 1.0

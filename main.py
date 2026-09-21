@@ -1,198 +1,209 @@
+"""
+Experiment entry point: config resolution, registry-driven model
+construction, centralised seeding, provenance, per-seed skip-existing.
+
+Models are named, not pointed at: `--dataset citeulike-a --model dcm` is
+resolved against configs/base.yaml + configs/datasets/citeulike-a.yaml +
+configs/models/dcm.yaml by src/config.py, which also enforces the
+per-layer key whitelists. The old `--config path/to.yaml` flag is gone --
+a single flat file per dataset is what allowed the pre-refactor
+`citeulike.yaml: beta: 0.05` override to hide.
+
+Choices come from what is actually on disk (configs/datasets/*.yaml,
+configs/models/*.yaml), so adding a dataset or model needs no edit here.
+"""
+
 import argparse
-import sys
-import yaml
+import json
+import platform
+import subprocess
+import time
+
 import torch
-import numpy as np
+from pathlib import Path
 
-from src.data.dataset import RecDataset
-from src.train import train_model
-from src.models import (
-    DeepCF, DeepCFStaticMaskAttn, DeepCFRPUCB, RPUCBAttn, RPUCBAttnFull,
-    PinterestBase, PinterestBaseRPUCB, PinterestDCM, PinterestDCMRPUCB,
+from src.config import (
+    available_datasets,
+    available_models,
+    dataset_is_available,
+    load_config,
+    resolve_seeds,
 )
-from src.utils import save_results, print_results_table
+from src.data.dataset import RecDataset
+from src.models.registry import build_model, model_summary
+from src.reproducibility import describe_determinism, set_global_seed
+from src.train import train_model
+from src.utils import print_results_table, run_all_significance_tests, run_result_exists, save_run_result
 
-# ── Valid model / dataset options ────────────────────────────────────────────
-MODEL_CHOICES = [
-    # Original DeepCF family
-    'deepcf', 'static_mask', 'rpucb', 'rpucb_attn', 'rpucb_attn_full',
-    # Pinterest family
-    'pinterest_base', 'pinterest_base_rpucb', 'pinterest_base_rpucb_kd',
-    'pinterest_dcm', 'pinterest_dcm_rpucb',
+# The main matrix. dcm_rpucb_shared has a config file but is deliberately
+# excluded (§2: available for a symmetric comparison, not a matrix row).
+MATRIX_MODEL_KEYS = [
+    "deepcf", "deepcf_rpucb", "deepcf_rpucb_attn",
+    "mind", "mind_rpucb_multi", "mind_rpucb",
+    "dcm", "dcm_rpucb_multi", "dcm_rpucb_kd", "dcm_rpucb_d",
 ]
-DATASET_CHOICES = ['ml-1m', 'AMusic', 'citeulike']
 
 
-def build_model(model_name, num_users, num_items, config, dataset):
-    embed_dim  = config['embed_dim']
-    rl_layers  = config.get('rl_layers', [512, 256, 128, 64])
-    ml_layers  = config.get('ml_layers', [512, 256, 128, 64])
-    attn_heads = config.get('attn_heads', 2)
-    dropout    = config.get('dropout', 0.0)
-    gamma_init = config.get('gamma_init', 2.0)
-    beta       = config.get('beta', 1.0)
+def read_dataset_manifest(data_path):
+    """
+    The sha256 checksums and stats written by the preprocessing scripts.
 
-    # Pinterest-family shared config
-    K                    = config.get('K', 7)
-    max_hist_len         = config.get('max_hist_len', 50)
-    summarization_hidden = config.get('summarization_hidden', 256)
-    n_fields             = config.get('n_fields', 4)
-    n_heads_dhen         = config.get('n_heads_dhen', 2)
-    transformer_layers   = config.get('transformer_layers', 2)
-    routing_iters        = config.get('routing_iters', 3)
-
-    # ── Original DeepCF family ─────────────────────────────────────────────
-    if model_name == 'deepcf':
-        return DeepCF(num_users, num_items, embed_dim,
-                      rl_layers, ml_layers, dropout=dropout)
-
-    elif model_name == 'static_mask':
-        return DeepCFStaticMaskAttn(num_users, num_items, embed_dim,
-                                    rl_layers, ml_layers, attn_heads=attn_heads, dropout=dropout)
-
-    elif model_name == 'rpucb':
-        return DeepCFRPUCB(
-            num_users, num_items, embed_dim, rl_layers, ml_layers,
-            user_interaction_counts=dataset.user_interaction_counts,
-            item_interaction_counts=dataset.item_interaction_counts,
-            dropout=dropout,
-        )
-
-    elif model_name == 'rpucb_attn':
-        return RPUCBAttn(
-            num_users, num_items, embed_dim, rl_layers, ml_layers,
-            user_interaction_counts=dataset.user_interaction_counts,
-            attn_heads=attn_heads, dropout=dropout,
-            gamma_init=gamma_init, beta=beta,
-        )
-
-    elif model_name == 'rpucb_attn_full':
-        return RPUCBAttnFull(
-            num_users, num_items, embed_dim, rl_layers, ml_layers,
-            user_interaction_counts=dataset.user_interaction_counts,
-            item_interaction_counts=dataset.item_interaction_counts,
-            attn_heads=attn_heads, dropout=dropout,
-            gamma_init=gamma_init, beta=beta,
-        )
-
-    # ── Pinterest family ───────────────────────────────────────────────────
-    elif model_name == 'pinterest_base':
-        return PinterestBase(
-            num_users, num_items, embed_dim=embed_dim,
-            summarization_hidden=summarization_hidden, n_fields=n_fields,
-            n_heads_dhen=n_heads_dhen, transformer_layers=transformer_layers,
-            attn_heads=attn_heads, dropout=dropout,
-        )
-
-    elif model_name in ('pinterest_base_rpucb', 'pinterest_base_rpucb_kd'):
-        effective_dim = K * embed_dim if model_name == 'pinterest_base_rpucb_kd' else embed_dim
-        return PinterestBaseRPUCB(
-            num_users, num_items, embed_dim=effective_dim, item_embed_dim=embed_dim,
-            summarization_hidden=summarization_hidden, n_fields=n_fields,
-            n_heads_dhen=n_heads_dhen, transformer_layers=transformer_layers,
-            attn_heads=attn_heads, dropout=dropout,
-            user_interaction_counts=dataset.user_interaction_counts,
-            gamma_init=gamma_init, beta=beta,
-        )
-
-    elif model_name == 'pinterest_dcm':
-        return PinterestDCM(
-            num_users, num_items, embed_dim=embed_dim, K=K,
-            user_train_items=dataset.user_train_items,
-            interaction_cols=dataset.interaction_cols,
-            max_hist_len=max_hist_len,
-            summarization_hidden=summarization_hidden, n_fields=n_fields,
-            n_heads_dhen=n_heads_dhen, transformer_layers=transformer_layers,
-            attn_heads=attn_heads, routing_iters=routing_iters, dropout=dropout,
-        )
-
-    elif model_name == 'pinterest_dcm_rpucb':
-        return PinterestDCMRPUCB(
-            num_users, num_items, embed_dim=embed_dim, K=K,
-            user_train_items=dataset.user_train_items,
-            interaction_cols=dataset.interaction_cols,
-            max_hist_len=max_hist_len,
-            summarization_hidden=summarization_hidden, n_fields=n_fields,
-            n_heads_dhen=n_heads_dhen, transformer_layers=transformer_layers,
-            attn_heads=attn_heads, routing_iters=routing_iters, dropout=dropout,
-            user_interaction_counts=dataset.user_interaction_counts,
-            gamma_init=gamma_init, beta=beta,
-        )
-
-    else:
-        raise ValueError(f"Unknown model: {model_name}")
+    §6 requires dataset checksums in every results JSON. Returning None
+    when the manifest is absent rather than raising, so a run is still
+    possible before preprocessing has been run -- but the absence is
+    recorded in the results file, which is what a provenance audit needs
+    to see.
+    """
+    manifest_path = Path(data_path) / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return {
+        "stats": manifest.get("stats"),
+        "files": manifest.get("files"),
+        "source": manifest.get("source"),
+    }
 
 
-def run_experiment(model_name, dataset_name, config_path, device, num_runs):
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+def gather_provenance(config, seed, deterministic, duration_s):
+    """§6: git SHA, resolved config, seed, torch/CUDA versions, GPU name,
+    hostname, duration, determinism mode, dataset checksums."""
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        git_sha = None
 
-    config['model'] = model_name
+    return {
+        "git_sha": git_sha,
+        "seed": seed,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "hostname": platform.node(),
+        "duration_s": duration_s,
+        "determinism": describe_determinism(deterministic),
+        "resolved_config": config,
+        "model_spec": model_summary(config["model"]),
+        "dataset_manifest": read_dataset_manifest(config["data_path"]),
+    }
 
-    all_results = []
 
-    for run_id in range(num_runs):
-        # Set seeds
-        seed = config.get('seed', 42) + run_id
-        torch.manual_seed(seed)
-        np.random.seed(seed)
+def run_experiment(model_name, dataset_name, device, seeds, checkpoint_root,
+                    results_root, deterministic, skip_existing, overrides=None):
+    for seed in seeds:
+        if skip_existing and run_result_exists(dataset_name, model_name, seed, results_root):
+            print(f"[skip] {dataset_name}/{model_name}/seed{seed} already has a result")
+            continue
 
-        # Load dataset
-        dataset = RecDataset(config['data_path'], config['num_negatives'], seed=seed)
+        config = load_config(dataset_name, model_name, overrides=overrides)
+        config["seed"] = seed
 
-        num_users = dataset.num_users
-        num_items = dataset.num_items
+        set_global_seed(seed, deterministic=deterministic)
 
-        # Instantiate model
-        model = build_model(model_name, num_users, num_items, config, dataset)
-        model = model.to(device)
+        dataset = RecDataset(config["data_path"], config["num_negatives"], seed=seed)
+        model = build_model(model_name, dataset, config).to(device)
 
-        print(f"--- Running {model_name} on {dataset_name} (Run {run_id+1}/{num_runs}) ---")
-        run_results = train_model(model, dataset, config, device, run_id=run_id)
-        all_results.append(run_results)
+        print(f"--- {dataset_name}/{model_name}  seed={seed} ---")
+        t0 = time.time()
+        result = train_model(model, model_name, dataset, dataset_name, config, device, seed,
+                              checkpoint_root=checkpoint_root)
+        duration = time.time() - t0
 
-    save_results(all_results, dataset_name, model_name, config)
+        provenance = gather_provenance(config, seed, deterministic, duration)
+        save_run_result(result, dataset_name, model_name, seed, config=config,
+                         provenance=provenance, root=results_root)
 
 
 def main():
+    datasets_on_disk = available_datasets()
+    models_on_disk = available_models()
+
     parser = argparse.ArgumentParser(
         description="Adaptive User Representation Capacity in Deep Collaborative Filtering"
     )
-    parser.add_argument('--model',   type=str, choices=MODEL_CHOICES)
-    parser.add_argument('--dataset', type=str, choices=DATASET_CHOICES)
-    parser.add_argument('--config',  type=str)
-    parser.add_argument('--device',  type=str, default='auto',
-                        help="cuda or cpu (default: auto-detect)")
-    parser.add_argument('--runs',    type=int, default=3,
-                        help="number of independent runs per experiment")
-    parser.add_argument('--all',     action='store_true',
-                        help=f"runs all {len(MODEL_CHOICES) * len(DATASET_CHOICES)} experiment combos")
+    parser.add_argument("--model", choices=models_on_disk)
+    parser.add_argument("--dataset", choices=datasets_on_disk)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--runs", type=int, default=3,
+                         help="number of seeds, base_seed..base_seed+runs-1")
+    parser.add_argument("--seeds", default=None,
+                         help="explicit comma-separated seeds, overrides --runs")
+    parser.add_argument("--all", action="store_true",
+                         help="run the full matrix: every dataset x the 10 matrix models")
+    parser.add_argument("--checkpoint-root", default="checkpoints")
+    parser.add_argument("--results-root", default="results")
+    parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument("--deterministic", action="store_true",
+                         help="bit-exact at a throughput cost; see src/reproducibility.py")
+    parser.add_argument("--max-epochs", type=int, default=None,
+                         help="override; the Phase 5 dry run uses a small value")
+    parser.add_argument("--beta", type=float, default=None,
+                         help="override for validation tuning (§3)")
+    parser.add_argument("--mask-init", type=float, default=None,
+                         help="override; ~1.0 gives the parity-start robustness run")
+    parser.add_argument("--loss-override", default=None, choices=["bpr"],
+                         help="§3 robustness check")
 
     args = parser.parse_args()
 
-    if args.device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    else:
-        device = args.device
-
+    device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     print(f"Using device: {device}")
 
+    overrides = {
+        "max_epochs": args.max_epochs,
+        "beta": args.beta,
+        "mask_init": args.mask_init,
+        "loss_override": args.loss_override,
+    }
+
     if args.all:
-        for dataset in DATASET_CHOICES:
-            config_path = f"configs/{dataset}.yaml"
-            for model in MODEL_CHOICES:
-                run_experiment(model, dataset, config_path, device, args.runs)
-
-        print_results_table()
+        usable = []
+        for dataset in datasets_on_disk:
+            available, reason = dataset_is_available(dataset)
+            if available:
+                usable.append(dataset)
+            else:
+                print(f"[skip dataset] {dataset}: {reason}")
+        if not usable:
+            parser.error("no dataset has its rating files on disk; run the "
+                          "preprocessing scripts in src/data/preprocess/ first")
+        targets = [(d, m) for d in usable for m in MATRIX_MODEL_KEYS]
     else:
-        if not args.model or not args.dataset or not args.config:
-            print("Error: If not using --all, you must explicitly provide "
-                  "--model, --dataset, and --config arguments.")
-            sys.exit(1)
+        if not args.model or not args.dataset:
+            parser.error("without --all you must pass --model and --dataset")
+        available, reason = dataset_is_available(args.dataset)
+        if not available:
+            parser.error(
+                f"{args.dataset}: {reason}. See configs/datasets/{args.dataset}.yaml "
+                f"for where the data comes from, then run the matching script in "
+                f"src/data/preprocess/."
+            )
+        targets = [(args.dataset, args.model)]
 
-        run_experiment(args.model, args.dataset, args.config, device, args.runs)
-        print_results_table()
+    # Seeds come from base.yaml's base_seed, which any resolved config carries.
+    probe = load_config(targets[0][0], targets[0][1])
+    seeds = resolve_seeds(probe, runs=args.runs, explicit=args.seeds)
+    print(f"Seeds: {seeds}  ({len(targets)} model/dataset combos "
+          f"= {len(targets) * len(seeds)} runs)")
+
+    for dataset_name, model_name in targets:
+        run_experiment(model_name, dataset_name, device, seeds,
+                        args.checkpoint_root, args.results_root,
+                        args.deterministic, args.skip_existing, overrides)
+
+    if args.all:
+        ran = sorted({d for d, _ in targets})
+        print_results_table(datasets=ran)
+        run_all_significance_tests(datasets=ran)
+    else:
+        print_results_table(models=[args.model], datasets=[args.dataset])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

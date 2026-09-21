@@ -1,34 +1,47 @@
+"""
+DeepCF + RP-UCB -- model 2. The pure mask test for the DeepCF backbone:
+identical architecture and capacity to model 1, differing only in the two
+masks.
+
+Fixed here: the mask formula. This model previously computed
+`sigmoid(w + gamma * explore)` with gamma initialised to zeros and no beta
+parameter, while every other masked model in the matrix used
+`clamp(sigmoid(w) + beta * sigmoid(gamma) * explore, 0, 1)` with
+gamma_init=2.0. Two consequences of the old form, both bad for the
+comparison it is supposed to support: the exploration bonus started at
+exactly zero and had to learn its way out, and there was no beta, so §3's
+"beta must be re-tuned on validation per family" was unimplementable for
+this family. Both masks now come from the shared `RPUCBMask`.
+
+Mask scope is user *and* item, per the locked decision. Recorded as an
+interpretation caveat: with `mask_init=0.5` the two masks multiply, so at
+initialisation a dense user's score is built from representations at 0.25x
+the magnitude the unmasked baseline sees. If this row comes out negative,
+rerun with `mask_init` near 1.0 before concluding anything about RP-UCB
+itself.
+
+Known wart, preserved deliberately. The user mask is d-dimensional and is
+applied both to the CFNet-ml embeddings (genuinely d-dimensional) and to
+the CFNet-rl branch output, whose width is `rl_layers[-1]`. Those are
+different representation spaces that happen to share a width because the
+default rl_layers ends at 64 = embed_dim. Masking the RL branch is
+defensible -- it is a learned representation and the README describes
+RP-UCB as gating representations before scoring -- but reusing the same
+mask vector across both spaces is a modelling choice that only typechecks
+by coincidence. Changing it would change the model relative to the
+mid-semester results, so it stays, with an assertion that makes the
+coincidence explicit instead of silent.
+"""
+
 import torch
 import torch.nn as nn
-from .base import BaseCF, build_mlp
+
+from .base import DEFAULT_ITEM_ENCODE_CHUNK, DEFAULT_PAIR_CHUNK, BaseCF, build_mlp, chunk_bounds
+from .deepcf import deepcf_score_encoded
+from .rpucb_mask import RPUCBMask
 
 
 class DeepCFRPUCB(BaseCF):
-    """
-    DeepCF with RP-UCB adaptive masking applied to *both* user and item
-    embedding branches.
-
-    The RP-UCB mask modulates each latent dimension according to how much
-    exploration is warranted given the user's interaction count N_u:
-
-        mask_u(u) = sigmoid(w_u  + gamma * log(n̄ / N_u))   clamped to [0,1]
-        mask_i(i) = sigmoid(w_i  + gamma * log(n̄ / N_i))   clamped to [0,1]
-
-    Both masks are applied in:
-      • the CFNet-rl branch  (element-wise multiplication before dot-product)
-      • the CFNet-ml branch  (element-wise multiplication before concatenation)
-
-    Args:
-        num_users               : number of users
-        num_items               : number of items
-        embed_dim               : latent dimensionality
-        rl_layers               : hidden layers for the RL (CFNet-rl) MLPs
-        ml_layers               : hidden layers for the ML (CFNet-ml) MLP
-        user_interaction_counts : LongTensor [num_users] — #interactions per user
-        item_interaction_counts : LongTensor [num_items] — #interactions per item
-        dropout                 : dropout probability
-    """
-
     def __init__(
         self,
         num_users,
@@ -39,6 +52,9 @@ class DeepCFRPUCB(BaseCF):
         user_interaction_counts=None,
         item_interaction_counts=None,
         dropout=0.0,
+        gamma_init=2.0,
+        beta=1.0,
+        mask_init=0.5,
     ):
         super().__init__()
         if rl_layers is None:
@@ -46,107 +62,79 @@ class DeepCFRPUCB(BaseCF):
         if ml_layers is None:
             ml_layers = [512, 256, 128, 64]
 
+        assert rl_layers[-1] == embed_dim, (
+            f"the d-dim RP-UCB mask is applied to the CFNet-rl branch output, so "
+            f"rl_layers[-1] ({rl_layers[-1]}) must equal embed_dim ({embed_dim}). "
+            f"See the module docstring before changing either."
+        )
+
         self.num_users = num_users
         self.num_items = num_items
         self.embed_dim = embed_dim
 
-        # ── RP-UCB: user side ────────────────────────────────────────────────
-        self.user_mask_embeddings = nn.Embedding(num_users, embed_dim)
-        self.user_gamma = nn.Parameter(torch.zeros(embed_dim))
+        self.user_mask = RPUCBMask(
+            num_users, embed_dim, counts=user_interaction_counts,
+            n_slots=1, gamma_init=gamma_init, beta=beta, mask_init=mask_init,
+        )
+        self.item_mask = RPUCBMask(
+            num_items, embed_dim, counts=item_interaction_counts,
+            n_slots=1, gamma_init=gamma_init, beta=beta, mask_init=mask_init,
+        )
 
-        if user_interaction_counts is None:
-            user_interaction_counts = torch.ones(num_users, dtype=torch.long)
-        self.register_buffer('user_counts', user_interaction_counts)
-        mean_user_cnt = self.user_counts.float().mean().item()
-        self.n_bar_user = max(1.0, mean_user_cnt)
-
-        # ── RP-UCB: item side ────────────────────────────────────────────────
-        self.item_mask_embeddings = nn.Embedding(num_items, embed_dim)
-        self.item_gamma = nn.Parameter(torch.zeros(embed_dim))
-
-        if item_interaction_counts is None:
-            item_interaction_counts = torch.ones(num_items, dtype=torch.long)
-        self.register_buffer('item_counts', item_interaction_counts)
-        mean_item_cnt = self.item_counts.float().mean().item()
-        self.n_bar_item = max(1.0, mean_item_cnt)
-
-        # ── CFNet-rl branch ──────────────────────────────────────────────────
         self.f_rl_user = build_mlp([num_items] + rl_layers, dropout=dropout)
         self.f_rl_item = build_mlp([num_users] + rl_layers, dropout=dropout)
 
-        # ── CFNet-ml branch ──────────────────────────────────────────────────
-        self.user_embedding = nn.Linear(num_items, embed_dim, bias=False)  # P^T
-        self.item_embedding = nn.Linear(num_users, embed_dim, bias=False)  # Q^T
+        self.user_embedding = nn.Linear(num_items, embed_dim, bias=False)
+        self.item_embedding = nn.Linear(num_users, embed_dim, bias=False)
         self.f_ml = build_mlp([2 * embed_dim] + ml_layers, dropout=dropout)
 
-        # ── Fusion ───────────────────────────────────────────────────────────
-        self.fusion = nn.Linear(2 * embed_dim, 1)
+        self.fusion = nn.Linear(rl_layers[-1] + ml_layers[-1], 1)
 
         self.init_weights()
-
-    # ------------------------------------------------------------------
-    # Mask helpers
-    # ------------------------------------------------------------------
-    def get_user_mask(self, user_ids):
-        w_u = self.user_mask_embeddings(user_ids)           # [B, d]
-        N_u = self.user_counts[user_ids].float().clamp(min=1.0)  # [B]
-        explore_scalar = torch.clamp(
-            torch.log(torch.tensor(self.n_bar_user, device=w_u.device) / N_u),
-            min=0.0,
-        )                                                    # [B]
-        explore_vec = self.user_gamma.unsqueeze(0) * explore_scalar.unsqueeze(1)  # [B, d]
-        return torch.sigmoid(w_u + explore_vec)             # [B, d]
-
-    def get_item_mask(self, item_ids):
-        w_i = self.item_mask_embeddings(item_ids)           # [B, d]
-        N_i = self.item_counts[item_ids].float().clamp(min=1.0)  # [B]
-        explore_scalar = torch.clamp(
-            torch.log(torch.tensor(self.n_bar_item, device=w_i.device) / N_i),
-            min=0.0,
-        )                                                    # [B]
-        explore_vec = self.item_gamma.unsqueeze(0) * explore_scalar.unsqueeze(1)  # [B, d]
-        return torch.sigmoid(w_i + explore_vec)             # [B, d]
-
-    # ------------------------------------------------------------------
-    # Forward
-    # ------------------------------------------------------------------
-    def forward(self, user_row, item_col, user_ids, item_ids=None):
-        return self.score_with_mask(user_row, item_col, user_ids, item_ids)
 
     def score(self, user_row, item_col, user_ids=None, item_ids=None):
         scores, _ = self.score_with_mask(user_row, item_col, user_ids, item_ids)
         return scores
 
-    def score_with_mask(self, user_row, item_col, user_ids, item_ids=None):
-        user_mask = self.get_user_mask(user_ids)            # [B, d]
+    def score_with_mask(self, user_row, item_col, user_ids=None, item_ids=None):
+        # Required, not optional. The old code fell back to an all-ones item
+        # mask when item_ids was absent, which silently turned a both-sides
+        # model into a user-only one with no error anywhere.
+        assert user_ids is not None, "DeepCFRPUCB requires user_ids"
+        assert item_ids is not None, "DeepCFRPUCB masks the item side and requires item_ids"
 
-        # Derive item_ids from item_col if not supplied
-        # (item_col is the normalised column vector; item IDs were stored
-        #  externally in the batch — passed as item_ids when available)
-        if item_ids is not None:
-            item_mask = self.get_item_mask(item_ids)        # [B, d]
-        else:
-            # Fallback: no item mask (uniform ones)
-            item_mask = torch.ones_like(user_mask)
+        user_mask = self.user_mask.flat(user_ids)      # [B, d]
+        item_mask = self.item_mask.flat(item_ids)      # [B, d]
 
-        # ── CFNet-rl ─────────────────────────────────────────────────────
-        p_u_rl = self.f_rl_user(user_row)                  # [B, d_rl]
-        q_i_rl = self.f_rl_item(item_col)                  # [B, d_rl]
+        p_u_rl = self.f_rl_user(user_row) * user_mask
+        q_i_rl = self.f_rl_item(item_col) * item_mask
+        z_rl = p_u_rl * q_i_rl
 
-        p_u_rl_masked = p_u_rl * user_mask
-        q_i_rl_masked = q_i_rl * item_mask
-        z_rl = p_u_rl_masked * q_i_rl_masked
+        p_u_ml = self.user_embedding(user_row) * user_mask
+        q_i_ml = self.item_embedding(item_col) * item_mask
+        z_ml = self.f_ml(torch.cat([p_u_ml, q_i_ml], dim=1))
 
-        # ── CFNet-ml ─────────────────────────────────────────────────────
-        p_u_ml = self.user_embedding(user_row)              # [B, d]
-        q_i_ml = self.item_embedding(item_col)              # [B, d]
-
-        p_u_ml_masked = p_u_ml * user_mask
-        q_i_ml_masked = q_i_ml * item_mask
-        concat_ml = torch.cat([p_u_ml_masked, q_i_ml_masked], dim=1)
-        z_ml = self.f_ml(concat_ml)
-
-        # ── Fusion ───────────────────────────────────────────────────────
-        z = torch.cat([z_rl, z_ml], dim=1)
-        scores = self.fusion(z).squeeze(-1)
+        scores = self.fusion(torch.cat([z_rl, z_ml], dim=1)).squeeze(-1)
         return scores, (user_mask, item_mask)
+
+    # ---- full-catalog scoring ----------------------------------------
+    def encode_items(self, item_cols, item_ids=None, chunk_size=DEFAULT_ITEM_ENCODE_CHUNK):
+        assert item_ids is not None, "DeepCFRPUCB masks the item side and requires item_ids"
+        rl, ml = [], []
+        for start, end in chunk_bounds(item_cols.size(0), chunk_size):
+            chunk = item_cols[start:end]
+            mask = self.item_mask.flat(item_ids[start:end])
+            rl.append(self.f_rl_item(chunk) * mask)
+            ml.append(self.item_embedding(chunk) * mask)
+        return {"rl": torch.cat(rl, dim=0), "ml": torch.cat(ml, dim=0)}
+
+    def encode_users(self, user_row, user_ids=None):
+        assert user_ids is not None, "DeepCFRPUCB requires user_ids"
+        mask = self.user_mask.flat(user_ids)
+        return {
+            "rl": self.f_rl_user(user_row) * mask,
+            "ml": self.user_embedding(user_row) * mask,
+        }
+
+    def score_encoded(self, user_enc, item_enc, pair_chunk=DEFAULT_PAIR_CHUNK):
+        return deepcf_score_encoded(self.f_ml, self.fusion, user_enc, item_enc, pair_chunk)

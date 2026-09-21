@@ -1,0 +1,2 @@
+# Model 1 -- unmasked DeepCF control. Loss: BCE (DeepCF's own paper), §3.
+model: deepcf

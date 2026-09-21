@@ -1,0 +1,12 @@
+# lastfm -- smallest catalog of the five. NOT YET IN THE REPO: obtain from
+# the DeepCF release (https://github.com/familyld/DeepCF) into data/lastfm/,
+# then run `python -m src.data.preprocess.deepcf_dropin --dataset lastfm`.
+dataset: lastfm
+data_path: data/lastfm
+batch_size: 256
+
+expected_stats:
+  users: 1741
+  items: 2665
+  interactions: 69149
+  sparsity: 98.51

@@ -1,0 +1,5 @@
+# Model 3 -- adds self-attention fusion to model 2. Isolates the attention
+# effect with the mask held fixed. Shares model 2's beta so the
+# `deepcf_rpucb -> deepcf_rpucb_attn` row stays a single-variable change.
+model: deepcf_rpucb_attn
+beta: 1.0

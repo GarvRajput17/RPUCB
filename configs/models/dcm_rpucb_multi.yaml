@@ -1,0 +1,7 @@
+# Model 8 -- pure mask test for the DCM backbone. Seven conditions kept
+# separate, each gated by its own per-slot mask. Capacity 7 x 64 = 448,
+# matching model 7.
+model: dcm_rpucb_multi
+head_mode: per_slot
+mask_granularity: per_slot
+beta: 1.0

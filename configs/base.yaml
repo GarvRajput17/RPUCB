@@ -1,0 +1,77 @@
+# Shared configuration for every run in the matrix.
+#
+# §5 locks hyperparameters as "shared fixed (d=64, K_max=7, max_hist_len=50);
+# only beta tuned, on validation only". Everything that is genuinely shared
+# therefore lives here and nowhere else -- a dataset or model file that tries
+# to override one of these is rejected by the loader (src/config.py), which is
+# what structurally prevents a repeat of the pre-refactor
+# `citeulike.yaml: beta: 0.05` silent per-dataset override.
+#
+# Merge order: base.yaml -> datasets/<name>.yaml -> models/<key>.yaml -> CLI.
+# The fully resolved result is written into every checkpoint and every results
+# JSON (§6), so what actually ran is auditable without re-deriving the merge.
+
+# ---- capacity ---------------------------------------------------------
+embed_dim: 64                       # d
+K: 7                                # DCM fixed interest count (Pinterest Table 6)
+max_hist_len: 50                    # history bag cap for routing
+
+# ---- DeepCF branches --------------------------------------------------
+# rl_layers[-1] must equal embed_dim: the d-dim RP-UCB mask is applied to the
+# CFNet-rl branch output as well as the ML embeddings. deepcf_rpucb.py asserts
+# this rather than letting the shapes agree by coincidence.
+#
+# DEVIATION, for the §9 register: pre-refactor, AMusic and citeulike used
+# rl_layers/ml_layers of [1024, 512, 64] because both have far more items than
+# users, while ml-1m used [512, 256, 128, 64]. §5 locks hyperparameters as
+# shared-fixed across datasets, so all five now use the ml-1m shape. This does
+# change DeepCF's branch capacity on AMusic and citeulike-a relative to the
+# mid-semester numbers -- deliberate, but not free, and it is a reason not to
+# read a dataset-to-dataset DeepCF difference as purely a data effect.
+rl_layers: [512, 256, 128, 64]
+ml_layers: [512, 256, 128, 64]
+attn_heads: 2
+
+# ---- Pinterest / MIND towers -----------------------------------------
+summarization_hidden: 256
+n_fields: 4
+n_heads_dhen: 2
+transformer_layers: 2
+routing_iters: 3
+label_aware_power: 2.0              # MIND label-aware attention temperature
+
+# ---- RP-UCB mask ------------------------------------------------------
+gamma_init: 2.0                     # sigmoid(2.0) ~ 0.88: exploration active from step one
+mask_init: 0.5                      # sigmoid(w) at init. See rpucb_mask.py --
+                                    # 0.5 with both-sides masking starts a dense
+                                    # user/item pair at 0.25x the unmasked control.
+                                    # Set near 1.0 for a parity-start robustness run.
+beta: 1.0                           # default only; tuned per family in models/*.yaml
+lambda_l1: 0.0001
+
+# ---- optimisation (§5) ------------------------------------------------
+lr: 0.001
+lr_min: 0.00001
+optimizer: adam                     # Adam + cosine schedule
+dropout: 0.0
+num_negatives: 8
+
+# ---- training / early stopping (§5) -----------------------------------
+max_epochs: 100
+patience: 10
+min_delta: 0.0001
+val_subsample_size: 1000            # per-epoch val runs on a fixed seeded subsample;
+                                    # test is full-catalog, all users, exactly once
+
+# ---- evaluation -------------------------------------------------------
+user_batch_size: 64
+item_encode_chunk: 8192
+pair_chunk: 262144
+
+# ---- seeds ------------------------------------------------------------
+base_seed: 42                       # runs use base_seed .. base_seed + runs - 1
+
+# ---- loss -------------------------------------------------------------
+# Native per family (§3); LOSS_FAMILY in src/losses.py is authoritative.
+# Set to "bpr" for the §3 robustness check across all families.
+loss_override: null
