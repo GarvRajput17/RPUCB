@@ -15,6 +15,7 @@ from .attention import SelfAttentionInteraction
 from .base import BaseCF, build_mlp
 from .dcm import DCM
 from .deepcf import DeepCF
+from .history import build_history_buffers, embed_history_bag
 from .deepcf_rpucb import DeepCFRPUCB
 from .deepcf_rpucb_attn import DeepCFRPUCBAttn
 from .mind import LabelAwareAttention, MINDRouting
@@ -58,6 +59,7 @@ __all__ = [
     "BaseCF", "build_mlp", "SelfAttentionInteraction",
     "PinterestTower", "LiteDHEN", "LiteMaskNet", "MLPSummarization",
     "RPUCBMask", "squash", "NEG_SCORE",
+    "build_history_buffers", "embed_history_bag",
     "DCM", "MINDRouting", "LabelAwareAttention",
     "DeepCF", "DeepCFRPUCB", "DeepCFRPUCBAttn",
     "MIND", "MINDRPUCBMulti", "MINDRPUCB",

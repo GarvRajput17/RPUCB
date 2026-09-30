@@ -44,13 +44,14 @@ Four fixes in this version.
    training-time argmax both skip them without the caller re-deriving
    validity.
 
-Memory note for the full-catalog evaluation rewrite: `_history_item_embeds`
-materialises a [B*L, num_users] gather. At L=50 and ml-1m's 6,040 users
-that is ~155 MB per 128 users in the batch. `get_user_conditions`
-deduplicates user ids before routing, which is what keeps this tractable
-when the same user repeats across many candidate items -- under
-full-catalog scoring the right pattern is one condition computation per
-user, broadcast across the catalog, not one per (user, item) pair.
+Two levels of deduplication keep this tractable, and both matter.
+`get_user_conditions` dedupes user ids before routing, because the same
+user recurs across every negative during training and every candidate at
+evaluation. `embed_history_bag` then dedupes item ids within the batch's
+bags, because at ml-1m's batch size the bags hold 51,200 slots drawn from
+a catalog of 3,706 items -- without it the same columns are embedded about
+fourteen times over and autograd retains all of them, 1.24 GB per forward
+against 90 MB.
 """
 
 import torch
@@ -59,43 +60,9 @@ import torch.nn as nn
 from .attention import SelfAttentionInteraction
 from .base import DEFAULT_ITEM_ENCODE_CHUNK, DEFAULT_PAIR_CHUNK, BaseCF, chunk_bounds
 from .dcm import DCM
+from .history import build_history_buffers, embed_history_bag
 from .pinterest_tower import LiteDHEN, PinterestTower
 from .routing_common import NEG_SCORE
-
-
-def build_history_buffers(num_users, user_train_items, max_hist_len, seed=0):
-    """
-    Fixed per-user history bags: ([num_users, L] long, [num_users, L] bool).
-
-    Users with more than `max_hist_len` train items get a seeded uniform
-    sample rather than an arbitrary prefix. Sampling happens once at
-    construction, so the bag is stable across epochs and across the
-    positive/negative forward passes within one loss term.
-    """
-    history_item_ids = torch.zeros(num_users, max_hist_len, dtype=torch.long)
-    history_mask = torch.zeros(num_users, max_hist_len, dtype=torch.bool)
-
-    if user_train_items is None:
-        return history_item_ids, history_mask
-
-    generator = torch.Generator().manual_seed(seed)
-
-    for u, items in user_train_items.items():
-        if u >= num_users:
-            continue
-        items = sorted(items)
-        if not items:
-            continue
-        if len(items) > max_hist_len:
-            perm = torch.randperm(len(items), generator=generator)[:max_hist_len]
-            chosen = [items[i] for i in perm.tolist()]
-        else:
-            chosen = items
-        n = len(chosen)
-        history_item_ids[u, :n] = torch.tensor(chosen, dtype=torch.long)
-        history_mask[u, :n] = True
-
-    return history_item_ids, history_mask
 
 
 class PinterestDCM(BaseCF):
@@ -163,10 +130,9 @@ class PinterestDCM(BaseCF):
         """e_i for each user's bag: ([B, L, d], [B, L])."""
         hist_ids = self.history_item_ids[user_ids]
         mask = self.history_mask[user_ids]
-        B, L = hist_ids.shape
-
-        hist_cols = self.interaction_cols[hist_ids.reshape(-1)]
-        e = self.item_tower.summarize(hist_cols).view(B, L, self.embed_dim)
+        e = embed_history_bag(
+            self.item_tower.summarize, self.interaction_cols, hist_ids, self.embed_dim
+        )
         return e, mask
 
     def get_user_conditions(self, user_ids):

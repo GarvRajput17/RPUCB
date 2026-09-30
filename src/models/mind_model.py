@@ -40,7 +40,7 @@ import torch.nn as nn
 
 from .base import DEFAULT_ITEM_ENCODE_CHUNK, DEFAULT_PAIR_CHUNK, BaseCF, chunk_bounds
 from .mind import LabelAwareAttention, MINDRouting
-from .pinterest_dcm import build_history_buffers
+from .history import build_history_buffers, embed_history_bag
 from .pinterest_tower import PinterestTower
 from .routing_common import NEG_SCORE
 from .rpucb_mask import RPUCBMask
@@ -108,9 +108,9 @@ class MIND(BaseCF):
     def _history_item_embeds(self, user_ids):
         hist_ids = self.history_item_ids[user_ids]
         mask = self.history_mask[user_ids]
-        B, L = hist_ids.shape
-        hist_cols = self.interaction_cols[hist_ids.reshape(-1)]
-        e = self.item_tower.summarize(hist_cols).view(B, L, self.embed_dim)
+        e = embed_history_bag(
+            self.item_tower.summarize, self.interaction_cols, hist_ids, self.embed_dim
+        )
         return e, mask
 
     def get_user_interests(self, user_ids):

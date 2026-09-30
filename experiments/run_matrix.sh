@@ -16,7 +16,8 @@
 #
 # --skip-existing is always on, so a killed run resumes by re-invoking the
 # same command: anything with a results JSON already on disk is skipped at
-# seed granularity. save_run_result and save_checkpoint both write via
+# seed granularity -- but only after main.py has confirmed the stored run
+# used the same settings, so a config change cannot be silently inherited. save_run_result and save_checkpoint both write via
 # temp-file-and-rename, so a job killed mid-write leaves either a complete
 # artifact or none -- never a truncated one that skip-existing would
 # mistake for finished.
@@ -31,9 +32,10 @@ DATASETS=${DATASETS:-"ml-1m lastfm citeulike-a AMusic AToy"}
 MODELS=${MODELS:-"deepcf deepcf_rpucb deepcf_rpucb_attn mind mind_rpucb_multi mind_rpucb dcm dcm_rpucb_multi dcm_rpucb_kd dcm_rpucb_d"}
 RUNS=${RUNS:-3}
 
-CHECKPOINT_ROOT="checkpoints"
-RESULTS_ROOT="results"
-LOG_DIR="logs"
+CHECKPOINT_ROOT=""
+RESULTS_ROOT=""
+LOG_DIR=""
+TAG=""
 DRY_RUN=0
 EXTRA_ARGS=()
 
@@ -43,16 +45,33 @@ while [[ $# -gt 0 ]]; do
     --checkpoint-root)  CHECKPOINT_ROOT="$2"; shift 2 ;;
     --results-root)     RESULTS_ROOT="$2"; shift 2 ;;
     --log-dir)          LOG_DIR="$2"; shift 2 ;;
+    --tag)              TAG="$2"; shift 2 ;;
     --runs)             RUNS="$2"; shift 2 ;;
     *)                  EXTRA_ARGS+=("$1"); shift ;;
   esac
 done
 
 if [[ $DRY_RUN -eq 1 ]]; then
+  # The dry run must not be able to pass for real results. Its first seed is
+  # 42, which is also the full run's first seed, so sharing a results root
+  # would let --skip-existing keep 2-epoch numbers for a third of the matrix
+  # and say nothing. Separate roots plus a tag; either alone would do, and
+  # both together make it impossible to mix by accident. main.py's stale
+  # check is the third layer.
   RUNS=1
+  TAG="${TAG:-dryrun}"
   EXTRA_ARGS+=(--max-epochs 2)
-  echo "DRY RUN: 1 seed, max_epochs=2. Produces the compute/disk estimate, not results."
+  CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-checkpoints_dryrun}"
+  RESULTS_ROOT="${RESULTS_ROOT:-results_dryrun}"
+  LOG_DIR="${LOG_DIR:-logs_dryrun}"
+  echo "DRY RUN: 1 seed, max_epochs=2, tag='${TAG}', roots ${RESULTS_ROOT}/ and ${CHECKPOINT_ROOT}/."
+  echo "         Produces the compute/disk estimate, not results."
 fi
+
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-checkpoints}"
+RESULTS_ROOT="${RESULTS_ROOT:-results}"
+LOG_DIR="${LOG_DIR:-logs}"
+[[ -n "$TAG" ]] && EXTRA_ARGS+=(--tag "$TAG")
 
 mkdir -p "$LOG_DIR" "$RESULTS_ROOT" "$CHECKPOINT_ROOT"
 
@@ -77,7 +96,7 @@ for dataset in $DATASETS; do
   fi
   for model in $MODELS; do
     n_total=$((n_total + 1))
-    log="${LOG_DIR}/${dataset}__${model}.log"
+    log="${LOG_DIR}/${dataset}__${model}${TAG:+__$TAG}.log"
     printf '[%s] %-14s %-20s -> %s\n' "$(date +%H:%M:%S)" "$dataset" "$model" "$log"
 
     if ! python main.py \

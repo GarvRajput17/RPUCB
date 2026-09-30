@@ -1,50 +1,50 @@
-# ── Python cache ──────────────────────────────────────────────────────────────
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
-*.pyo
-
-# ── Data (raw datasets are large; commit only configs/scripts) ────────────────
-data/*/
-# Allow the empty directory placeholder if you use one
-!data/.gitkeep
-raw/
-
-# ── Results (generated at runtime — do NOT commit) ───────────────────────────
-results/
-results_old/
-results*
-
-# ── Model checkpoints ─────────────────────────────────────────────────────────
-*.pt
-*.pth
-*.ckpt
-
-# ── Logs ──────────────────────────────────────────────────────────────────────
-*.log
-wandb/
-runs/
-
-# ── macOS ─────────────────────────────────────────────────────────────────────
-.DS_Store
-._*
-
-# ── Zip exports (submit separately) ──────────────────────────────────────────
-*.zip
-
-# ── Scratch / temp ────────────────────────────────────────────────────────────
-*.tmp
-*.bak
-
-# ── Standard Python ignores ────────────────────────────────────────────────────
-*.pyc
-*.pyo
 *.egg-info/
 dist/
 build/
 .env
-.venv 
+.venv/
+.pytest_cache/
 
-# ── Image Files ────────────────────────────────────────────────────────────────
+# ── Data ──────────────────────────────────────────────────────────────────────
+# Rating files are ignored; each dataset's manifest.json is tracked. The
+# committed checksums are what let another machine prove its copy of the
+# data is identical to this one, so they have to travel through git rather
+# than alongside the data they describe.
+#
+# Ignore the files one level down, not the directories: git cannot
+# re-include a file inside a directory it has already excluded, so a bare
+# `data/*/` here would make the negation below silently do nothing.
+data/*/*
+!data/*/manifest.json
+raw/
+
+# ── Run outputs ───────────────────────────────────────────────────────────────
+# results/ is the main matrix; results_dryrun/, results_tuning/ and any
+# other tagged root follow the results_*/ pattern. Directories only -- a
+# bare `results*` would also swallow any source file whose name starts
+# with "results".
+results/
+results_*/
+*.pt
+*.pth
+*.ckpt
+*.log
+wandb/
+runs/
+
+# ── Images ────────────────────────────────────────────────────────────────────
+# Ignored by default. Stage I's sparsity plots will need an exception or a
+# `git add -f` if they are meant to live in the repo.
 *.png
 *.jpg
 *.jpeg
+
+# ── OS and scratch ────────────────────────────────────────────────────────────
+.DS_Store
+._*
+*.tmp
+*.bak
+*.zip

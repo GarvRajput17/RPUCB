@@ -34,14 +34,17 @@ place without the others would silently misalign which negative gets
 scored against which user.
 """
 
+import time
+
 import torch
 import torch.optim as optim
 from tqdm import tqdm
 
 from .checkpoint import checkpoint_path, load_checkpoint, save_checkpoint
 from .early_stopping import EarlyStopping
-from .evaluate import evaluate_split
+from .evaluate import evaluate_popularity, evaluate_split
 from .losses import LOSS_FAMILY, bce_loss, bpr_loss, sampled_softmax_loss, uniform_log_q
+from .utils import run_slug
 
 
 def _mask_l1_penalty(model, user_ids, item_ids):
@@ -59,6 +62,43 @@ def _mask_l1_penalty(model, user_ids, item_ids):
     if hasattr(model, "item_mask"):
         penalty = penalty + model.item_mask.l1_penalty(item_ids)
     return penalty
+
+
+def _sample_ids(n, sample_size, seed, device):
+    """Deterministic id sample for the per-epoch mask diagnostics."""
+    if n <= sample_size:
+        return torch.arange(n, device=device)
+    g = torch.Generator().manual_seed(seed)
+    return torch.randperm(n, generator=g)[:sample_size].to(device)
+
+
+@torch.no_grad()
+def mask_diagnostics(model, device, seed, sample_size=4096):
+    """
+    Fraction of RP-UCB mask entries pinned at the upper clamp, where the
+    gradient to both `w` and `gamma` is exactly zero.
+
+    Worth logging every epoch rather than reconstructing later: the
+    exploration bonus is largest for the sparsest users, which is exactly
+    where it saturates, so a null result on the sparse datasets could be
+    the clamp rather than the method. None for unmasked models.
+    """
+    out = {}
+    for side, attr, size in (("user", "user_mask", "num_users"),
+                             ("item", "item_mask", "num_items")):
+        mask = getattr(model, attr, None)
+        if mask is None:
+            continue
+        ids = _sample_ids(getattr(model, size), sample_size, seed, device)
+        out[f"{side}_mask_saturation"] = mask.saturation(ids)
+    return out or None
+
+
+def peak_memory_mb():
+    """Peak allocated GPU memory since the last reset, or None on CPU."""
+    if not torch.cuda.is_available():
+        return None
+    return torch.cuda.max_memory_allocated() / 1e6
 
 
 def _tile_negatives(user_row, user_ids, neg_item_cols, neg_items_idx):
@@ -79,6 +119,8 @@ def compute_loss(
     loss_override = config.get("loss_override")
     lambda_l1 = config.get("lambda_l1", 0.0)
 
+    aux = {}
+
     if family == "bce":
         pos_scores, _ = model.score_with_mask(user_row, pos_item_col, user_ids, pos_items)
         neg_flat, _ = model.score_with_mask(
@@ -94,6 +136,13 @@ def compute_loss(
         # matching the paper's stated computational shortcut.
         pos_scores_k, _ = model.score_multi(user_row, pos_item_col, user_ids, pos_items)
         j_star = pos_scores_k.argmax(dim=1)
+        # Which of the K conditions the positive selected. Accumulated over
+        # the epoch as a histogram: if one slot wins almost always, the
+        # other conditions never learn to reject negatives, yet evaluation
+        # still takes the max over all K. That asymmetry is the leading
+        # explanation for DCM's first-light result -- the lowest training
+        # loss of the three families and near-chance ranking.
+        aux["j_star"] = j_star.detach()
         pos_scores = pos_scores_k[torch.arange(B, device=device), j_star]
 
         neg_scores_k, _ = model.score_multi(
@@ -135,7 +184,7 @@ def compute_loss(
     if lambda_l1 > 0:
         loss = loss + lambda_l1 * _mask_l1_penalty(model, user_ids, pos_items)
 
-    return loss
+    return loss, aux
 
 
 def train_one_epoch(
@@ -144,6 +193,7 @@ def train_one_epoch(
 ):
     model.train()
     total_loss = 0.0
+    j_star_counts = None
 
     pbar = tqdm(dataloader, desc="Training")
     for step, batch in enumerate(pbar):
@@ -162,7 +212,7 @@ def train_one_epoch(
         )
 
         optimizer.zero_grad()
-        loss = compute_loss(
+        loss, aux = compute_loss(
             model, model_name, user_row, pos_item_col, user_ids, pos_items,
             user_row_tiled, neg_cols_stacked, user_ids_tiled, neg_item_ids_flat,
             num_negatives, B, device, config,
@@ -173,12 +223,18 @@ def train_one_epoch(
         total_loss += loss.item()
         pbar.set_postfix({"loss": f"{total_loss / (step + 1):.4f}"})
 
-    return total_loss / len(dataloader)
+        if "j_star" in aux:
+            if j_star_counts is None:
+                j_star_counts = torch.zeros(model.K, dtype=torch.long, device=device)
+            j_star_counts += torch.bincount(aux["j_star"], minlength=model.K)
+
+    counts = j_star_counts.tolist() if j_star_counts is not None else None
+    return total_loss / len(dataloader), counts
 
 
 def train_model(
     model, model_name, dataset, dataset_name, config, device, seed,
-    checkpoint_root="checkpoints",
+    checkpoint_root="checkpoints", run_tag=None,
 ):
     """
     Full run for one (dataset, model, seed): train with early stopping on
@@ -189,7 +245,11 @@ def train_model(
     YAML files keep working until Checkpoint 3's config restructure
     settles on `max_epochs: 100` explicitly per §5.
     """
-    dataloader = dataset.get_train_dataloader(config["batch_size"], seed=seed)
+    dataloader = dataset.get_train_dataloader(
+        config["batch_size"], seed=seed,
+        num_workers=config.get("num_workers", 8),
+        pin_memory=config.get("pin_memory"),   # None -> on iff CUDA/HIP present
+    )
 
     optimizer_name = config.get("optimizer", "adam").lower()
     if optimizer_name != "adam":
@@ -210,8 +270,12 @@ def train_model(
         mode="max",
     )
 
-    ckpt_path = checkpoint_path(dataset_name, model_name, seed, root=checkpoint_root)
-    val_subsample_size = config.get("val_subsample_size", 1000)
+    # Tagged variants get their own checkpoint tree, matching their results
+    # tree, so a beta sweep never overwrites a main-matrix checkpoint.
+    ckpt_path = checkpoint_path(
+        dataset_name, run_slug(model_name, run_tag), seed, root=checkpoint_root
+    )
+    val_subsample_size = config.get("val_subsample_size", 1000)  # None -> full val set
 
     # Evaluation memory/speed knobs. These come from base.yaml rather than
     # evaluate_split's defaults so the Phase 5 dry run can tune them per
@@ -222,7 +286,14 @@ def train_model(
         "user_batch_size": config.get("user_batch_size", 64),
         "item_chunk_size": config.get("item_encode_chunk", 8192),
         "pair_chunk": config.get("pair_chunk", 262144),
+        "tie_policy": config.get("tie_policy", "mid"),
+        "tie_atol": config.get("tie_atol", 1e-6),
     }
+
+    # Which val metric early stopping watches (§5 default HR@10; see
+    # base.yaml for why HR@100 may be the better choice under full-catalog
+    # evaluation).
+    monitor = config.get("early_stopping_metric", "HR@10")
 
     # Preloaded once per run so val evaluation (every epoch) and training
     # both index the same resident tensors instead of re-transferring the
@@ -232,14 +303,30 @@ def train_model(
 
     epoch_logs = []
     final_epoch = -1
+    j_star_counts = None
+
+    # The Phase 5 dry run exists to produce a compute and disk estimate, and
+    # it cannot do that from a single total duration. Training and validation
+    # are timed separately because they scale differently -- val cost is
+    # driven by catalog size, training by interaction count -- and peak
+    # memory is the number that decides whether a batch size survives on
+    # worker1.
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     for epoch in range(max_epochs):
         final_epoch = epoch
-        train_loss = train_one_epoch(
+
+        t0 = time.perf_counter()
+        train_loss, epoch_j_star = train_one_epoch(
             model, model_name, dataloader, optimizer, device, config,
             interaction_rows_gpu, interaction_cols_gpu,
         )
+        train_seconds = time.perf_counter() - t0
+        if epoch_j_star is not None:
+            j_star_counts = epoch_j_star
 
+        t0 = time.perf_counter()
         val_metrics = evaluate_split(
             model, dataset, "val", device,
             max_users=val_subsample_size, seed=seed,
@@ -247,24 +334,44 @@ def train_model(
             interaction_cols_gpu=interaction_cols_gpu,
             **eval_kwargs,
         )
-        val_hr10 = val_metrics["HR@10"]
-        improved = stopper.step(val_hr10, epoch)
+        val_seconds = time.perf_counter() - t0
+
+        if monitor not in val_metrics:
+            raise KeyError(
+                f"early_stopping_metric={monitor!r} is not among the computed "
+                f"val metrics {sorted(val_metrics)}"
+            )
+        val_score = val_metrics[monitor]
+        improved = stopper.step(val_score, epoch)
 
         if improved:
+            # Optimizer and scheduler state triple the file and nothing
+            # reads them back -- there is no mid-run resume path, only
+            # --skip-existing at run granularity. Opt in via config if that
+            # ever changes.
+            keep_optim = config.get("checkpoint_optimizer_state", False)
             save_checkpoint(
-                ckpt_path, model, optimizer, scheduler, epoch, val_metrics,
-                config, seed, early_stopping_state=stopper.state_dict(),
+                ckpt_path, model,
+                optimizer if keep_optim else None,
+                scheduler if keep_optim else None,
+                epoch, val_metrics, config, seed,
+                early_stopping_state=stopper.state_dict(),
             )
 
         print(
             f"[{dataset_name}/{model_name}/seed{seed}] "
             f"epoch {epoch + 1}/{max_epochs}  loss={train_loss:.4f}  "
-            f"val_HR@10={val_hr10:.4f}  best={stopper.best_score:.4f}@{stopper.best_epoch}"
+            f"val_{monitor}={val_score:.4f}  best={stopper.best_score:.4f}@{stopper.best_epoch}"
         )
 
         epoch_logs.append({
             "epoch": epoch,
             "train_loss": train_loss,
+            "train_seconds": round(train_seconds, 2),
+            "val_seconds": round(val_seconds, 2),
+            "lr": optimizer.param_groups[0]["lr"],
+            **(mask_diagnostics(model, device, seed) or {}),
+            **({"j_star_counts": epoch_j_star} if epoch_j_star is not None else {}),
             **{f"val_{k}": v for k, v in val_metrics.items()},
         })
 
@@ -277,15 +384,46 @@ def train_model(
     restored = load_checkpoint(ckpt_path, model, map_location=device)
     model.to(device)
 
+    t0 = time.perf_counter()
     test_metrics = evaluate_split(
         model, dataset, "test", device, max_users=None,
         interaction_rows_gpu=interaction_rows_gpu,
         interaction_cols_gpu=interaction_cols_gpu,
         **eval_kwargs,
     )
+    test_seconds = time.perf_counter() - t0
+
+    # Non-personalised floor on the same split, same exclusions, same tie
+    # policy. Identical for every model on a dataset, but stored per run so
+    # each results file can be read on its own.
+    popularity_metrics = None
+    if config.get("popularity_reference", True):
+        popularity_metrics = evaluate_popularity(
+            dataset, "test", device, max_users=None,
+            user_batch_size=eval_kwargs["user_batch_size"],
+            tie_policy=eval_kwargs["tie_policy"], tie_atol=eval_kwargs["tie_atol"],
+            interaction_cols_gpu=interaction_cols_gpu,
+        )
+
+    train_seconds = sum(e["train_seconds"] for e in epoch_logs)
+    val_seconds = sum(e["val_seconds"] for e in epoch_logs)
 
     return {
         "test_metrics": test_metrics,
+        "popularity_reference": popularity_metrics,
+        "timing": {
+            "epochs_run": len(epoch_logs),
+            "train_seconds_total": round(train_seconds, 2),
+            "train_seconds_per_epoch": round(train_seconds / max(len(epoch_logs), 1), 2),
+            "val_seconds_total": round(val_seconds, 2),
+            "val_seconds_per_epoch": round(val_seconds / max(len(epoch_logs), 1), 2),
+            "test_seconds": round(test_seconds, 2),
+        },
+        "peak_memory_mb": peak_memory_mb(),
+        "j_star_counts": j_star_counts,
+        "mask_saturation_at_end": mask_diagnostics(model, device, seed),
+        "cold_report": getattr(dataset, "cold_report", None),
+        "early_stopping_metric": monitor,
         "val_metrics_at_best": restored["val_metrics"],
         "best_epoch": restored["epoch"],
         "final_epoch": final_epoch,

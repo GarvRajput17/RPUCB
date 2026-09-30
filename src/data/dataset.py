@@ -189,18 +189,79 @@ class RecDataset:
             col_normalized.data[s:e] /= col_sums[i]
         self.interaction_cols = torch.from_numpy(col_normalized.transpose().toarray()).float()
 
+        self.cold_report = self._report_cold_structure()
+
     # ------------------------------------------------------------------
-    def get_train_dataloader(self, batch_size, seed=None, shuffle=True, num_workers=8):
+    def _report_cold_structure(self):
+        """
+        Count and print the users and items that no model here can rank.
+
+        The preprocessing gate reports this for the raw files; these are the
+        post-carve numbers, which are strictly worse and seed-dependent,
+        because removing one train item per user turns some singleton items
+        cold. Both belong on the record.
+
+        A train-less user is the sharper case. Their feature row is all
+        zeros and their history bag is empty, and for the MIND family that
+        makes every interest vector exactly zero, so every item in the
+        catalog scores exactly 0.0. With an optimistic tie rule that is a
+        free rank-1 hit -- 43 of them on AMusic, which was 65% of MIND's
+        measured HR@10 in the first-light run. The mid-rank default in
+        metrics.py is what neutralises it.
+        """
+        user_counts = self.user_interaction_counts
+        item_counts = self.item_interaction_counts
+
+        trainless_users = int((user_counts == 0).sum())
+        cold_items = int((item_counts == 0).sum())
+        cold_test = sum(1 for i in self.test_item.values() if item_counts[i] == 0)
+        cold_val = sum(1 for i in self.val_item.values() if item_counts[i] == 0)
+
+        report = {
+            "trainless_users": trainless_users,
+            "cold_catalog_items": cold_items,
+            "cold_test_positives": cold_test,
+            "cold_val_positives": cold_val,
+            "test_users": len(self.test_item),
+            "val_users": len(self.val_item),
+        }
+
+        if trainless_users or cold_test or cold_val:
+            print(
+                f"[RecDataset] after val carving (seed {self.seed}): "
+                f"{trainless_users:,} train-less users, {cold_items:,} cold catalog items, "
+                f"{cold_test:,}/{len(self.test_item):,} cold test positives "
+                f"({100 * cold_test / max(len(self.test_item), 1):.1f}%), "
+                f"{cold_val:,}/{max(len(self.val_item), 1):,} cold val positives "
+                f"({100 * cold_val / max(len(self.val_item), 1):.1f}%). "
+                f"These are unrankable by any model here; metrics are also "
+                f"reported over the warm subset."
+            )
+
+        return report
+
+    # ------------------------------------------------------------------
+    def get_train_dataloader(self, batch_size, seed=None, shuffle=True,
+                              num_workers=8, pin_memory=None):
+        """
+        `num_workers` and `pin_memory` come from config rather than being
+        hardcoded: 8 workers is wrong on a laptop or inside WSL, where the
+        shared-memory limit shows up as workers dying mid-epoch, and
+        pinning warns and does nothing without an accelerator. `pin_memory
+        =None` means "on iff CUDA/HIP is available".
+        """
         dataset = RecTrainDataset(
             self.train_pairs, self.user_train_items, self.num_items, self.num_negatives
         )
         seed = seed if seed is not None else self.seed
+        if pin_memory is None:
+            pin_memory = torch.cuda.is_available()
         return DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=pin_memory,
             worker_init_fn=seed_worker,
             generator=make_generator(seed),
         )

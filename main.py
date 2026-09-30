@@ -16,6 +16,7 @@ configs/models/*.yaml), so adding a dataset or model needs no edit here.
 import argparse
 import json
 import platform
+import sys
 import subprocess
 import time
 
@@ -31,9 +32,15 @@ from src.config import (
 )
 from src.data.dataset import RecDataset
 from src.models.registry import build_model, model_summary
-from src.reproducibility import describe_determinism, set_global_seed
+from src.reproducibility import describe_determinism, is_hip, set_global_seed
 from src.train import train_model
-from src.utils import print_results_table, run_all_significance_tests, run_result_exists, save_run_result
+from src.utils import (
+    StaleResultError,
+    check_existing_run,
+    print_results_table,
+    run_all_significance_tests,
+    save_run_result,
+)
 
 # The main matrix. dcm_rpucb_shared has a config file but is deliberately
 # excluded (§2: available for a symmetric comparison, not a matrix row).
@@ -79,12 +86,29 @@ def gather_provenance(config, seed, deterministic, duration_s):
     except Exception:
         git_sha = None
 
+    # Record the accelerator properly on both backends. On a ROCm build
+    # `torch.version.cuda` is None and the real version lives in
+    # `torch.version.hip`, so a CUDA-only provenance block would describe an
+    # AMD run as having no GPU at all. Total memory is recorded because it
+    # is what a peak_memory_mb figure has to be read against.
+    gpu = {}
+    if torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)
+        gpu = {
+            "name": torch.cuda.get_device_name(0),
+            "count": torch.cuda.device_count(),
+            "total_memory_mb": round(props.total_memory / 1e6),
+        }
+
     return {
         "git_sha": git_sha,
         "seed": seed,
         "torch_version": torch.__version__,
+        "backend": "rocm" if is_hip() else "cuda",
         "cuda_version": torch.version.cuda,
-        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "hip_version": getattr(torch.version, "hip", None),
+        "gpu": gpu or None,
+        "gpu_name": gpu.get("name"),
         "hostname": platform.node(),
         "duration_s": duration_s,
         "determinism": describe_determinism(deterministic),
@@ -95,14 +119,19 @@ def gather_provenance(config, seed, deterministic, duration_s):
 
 
 def run_experiment(model_name, dataset_name, device, seeds, checkpoint_root,
-                    results_root, deterministic, skip_existing, overrides=None):
+                    results_root, deterministic, skip_existing, overrides=None,
+                    run_tag=None):
     for seed in seeds:
-        if skip_existing and run_result_exists(dataset_name, model_name, seed, results_root):
-            print(f"[skip] {dataset_name}/{model_name}/seed{seed} already has a result")
-            continue
-
         config = load_config(dataset_name, model_name, overrides=overrides)
         config["seed"] = seed
+
+        # Resolve the config first: skipping is only safe once we can prove
+        # the stored result was produced under the same settings.
+        if skip_existing:
+            if check_existing_run(config, dataset_name, model_name, seed,
+                                   results_root, run_tag):
+                print(f"[skip] {dataset_name}/{model_name}/seed{seed} already has a result")
+                continue
 
         set_global_seed(seed, deterministic=deterministic)
 
@@ -112,12 +141,12 @@ def run_experiment(model_name, dataset_name, device, seeds, checkpoint_root,
         print(f"--- {dataset_name}/{model_name}  seed={seed} ---")
         t0 = time.time()
         result = train_model(model, model_name, dataset, dataset_name, config, device, seed,
-                              checkpoint_root=checkpoint_root)
+                              checkpoint_root=checkpoint_root, run_tag=run_tag)
         duration = time.time() - t0
 
         provenance = gather_provenance(config, seed, deterministic, duration)
         save_run_result(result, dataset_name, model_name, seed, config=config,
-                         provenance=provenance, root=results_root)
+                         provenance=provenance, root=results_root, tag=run_tag)
 
 
 def main():
@@ -149,6 +178,15 @@ def main():
                          help="override; ~1.0 gives the parity-start robustness run")
     parser.add_argument("--loss-override", default=None, choices=["bpr"],
                          help="§3 robustness check")
+    parser.add_argument("--tie-policy", default=None,
+                         choices=["mid", "optimistic", "pessimistic"],
+                         help="sensitivity check; the mid-vs-optimistic gap measures "
+                              "the cold-item artifact")
+    parser.add_argument("--early-stopping-metric", default=None,
+                         help="val metric early stopping watches (default HR@10)")
+    parser.add_argument("--tag", default=None,
+                         help="names a run variant. Required for any override, so "
+                              "variants never share a path with the main matrix.")
 
     args = parser.parse_args()
 
@@ -160,7 +198,22 @@ def main():
         "beta": args.beta,
         "mask_init": args.mask_init,
         "loss_override": args.loss_override,
+        "tie_policy": args.tie_policy,
+        "early_stopping_metric": args.early_stopping_metric,
     }
+    active = sorted(k for k, v in overrides.items() if v is not None)
+
+    # An override changes what the run measures, so it must not land on the
+    # main matrix's path. Requiring a tag is what keeps the beta sweep, the
+    # parity-start check, the BPR pass and the tie sensitivity check from
+    # overwriting -- or being mistaken for -- real results.
+    if active and not args.tag:
+        parser.error(
+            f"overrides {active} require --tag NAME so the run is written to its "
+            f"own results and checkpoint directories (e.g. --tag beta0.5)"
+        )
+    if args.tag:
+        print(f"Run tag: {args.tag}   overrides: {active or 'none'}")
 
     if args.all:
         usable = []
@@ -193,16 +246,22 @@ def main():
           f"= {len(targets) * len(seeds)} runs)")
 
     for dataset_name, model_name in targets:
-        run_experiment(model_name, dataset_name, device, seeds,
-                        args.checkpoint_root, args.results_root,
-                        args.deterministic, args.skip_existing, overrides)
+        try:
+            run_experiment(model_name, dataset_name, device, seeds,
+                            args.checkpoint_root, args.results_root,
+                            args.deterministic, args.skip_existing, overrides,
+                            run_tag=args.tag)
+        except StaleResultError as exc:
+            print(f"\n[stale results] {exc}")
+            sys.exit(2)
 
     if args.all:
         ran = sorted({d for d, _ in targets})
-        print_results_table(datasets=ran)
-        run_all_significance_tests(datasets=ran)
+        print_results_table(datasets=ran, root=args.results_root, tag=args.tag)
+        run_all_significance_tests(datasets=ran, root=args.results_root, tag=args.tag)
     else:
-        print_results_table(models=[args.model], datasets=[args.dataset])
+        print_results_table(models=[args.model], datasets=[args.dataset],
+                            root=args.results_root, tag=args.tag)
 
 
 if __name__ == "__main__":

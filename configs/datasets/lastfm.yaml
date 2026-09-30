@@ -1,6 +1,6 @@
-# lastfm -- smallest catalog of the five. NOT YET IN THE REPO: obtain from
-# the DeepCF release (https://github.com/familyld/DeepCF) into data/lastfm/,
-# then run `python -m src.data.preprocess.deepcf_dropin --dataset lastfm`.
+# lastfm -- smallest catalog of the five. From the DeepCF release
+# (https://github.com/familyld/DeepCF, Data/lastfm.*.rating) into data/lastfm/,
+# then `python -m src.data.preprocess.deepcf_dropin --dataset lastfm`.
 dataset: lastfm
 data_path: data/lastfm
 batch_size: 256

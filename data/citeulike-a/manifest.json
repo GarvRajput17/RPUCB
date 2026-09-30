@@ -1,0 +1,48 @@
+{
+  "dataset": "citeulike-a",
+  "stats": {
+    "users": 5551,
+    "items": 16980,
+    "interactions": 204986,
+    "sparsity": 99.78,
+    "train_pairs": 199435,
+    "test_pairs": 5551,
+    "duplicate_train_rows": 0,
+    "duplicate_test_rows": 0,
+    "test_item_in_own_train": 0,
+    "users_without_test_row": 0,
+    "users_with_multiple_test_rows": 0,
+    "unused_user_ids": 0,
+    "unused_item_ids": 0
+  },
+  "files": {
+    "train.rating": {
+      "sha256": "5eba178abcae92d9b5312bf26e7d8ad3b95c1dd8e0be0eea3a419cde8416a334",
+      "bytes": 2005687
+    },
+    "test.rating": {
+      "sha256": "dd56715debed1ed4cd1b2819ef34099a4c5a825ec881c2b7e090538f7a8a9089",
+      "bytes": 55630
+    }
+  },
+  "diagnostics": {
+    "interactions_per_user": {
+      "min": 10,
+      "median": 22,
+      "below_5": 0
+    },
+    "interactions_per_item": {
+      "min": 1,
+      "median": 9.0,
+      "below_5": 1541
+    },
+    "trainless_test_users": 0,
+    "trainless_test_users_fraction": 0.0,
+    "cold_test_positives": 8,
+    "cold_test_positives_fraction": 0.0014,
+    "cold_catalog_items": 8
+  },
+  "source": "citeulike-a raw users.dat -- https://github.com/js05212/citeulike-a. Upstream has >= 10 interactions per user; items are not filtered.",
+  "preprocessing": "leave-one-out, random held-out item (no timestamps)",
+  "split_seed": 42
+}

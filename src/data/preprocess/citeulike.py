@@ -27,8 +27,9 @@ measured against, and re-drawing it per run would make results
 incomparable. This is unrelated to the per-run val split, which
 `RecDataset` carves from train at load time using the run seed.
 
-The upstream release is already 5-core filtered (min 10 interactions per
-user), so no additional filtering happens here.
+The upstream release has at least 10 interactions per user; items are not
+filtered (some have a single interaction). No additional filtering happens
+here -- the manifest's diagnostics block records the minimums.
 
 Usage:
     python -m src.data.preprocess.citeulike
@@ -38,7 +39,14 @@ import argparse
 import random
 from pathlib import Path
 
-from .common import compute_stats, report, verify_stats, write_pairs, write_manifest
+from .common import (
+    compute_diagnostics,
+    compute_stats,
+    report,
+    verify_stats,
+    write_manifest,
+    write_pairs,
+)
 
 DATASET = "citeulike-a"
 SEED = 42
@@ -47,7 +55,7 @@ DEFAULT_OUTPUT = Path("data/citeulike-a")
 
 SOURCE_NOTE = (
     "citeulike-a raw users.dat -- https://github.com/js05212/citeulike-a. "
-    "Upstream release is already 5-core filtered."
+    "Upstream has >= 10 interactions per user; items are not filtered."
 )
 
 
@@ -101,11 +109,12 @@ def process(input_path=DEFAULT_INPUT, output_dir=DEFAULT_OUTPUT, seed=SEED, stri
     write_pairs(output_dir / "test.rating", test_pairs)
 
     stats = compute_stats(train_pairs, test_pairs)
+    diagnostics = compute_diagnostics(train_pairs, test_pairs)
     problems = verify_stats(DATASET, stats, strict=strict)
-    report(DATASET, stats, problems)
+    report(DATASET, stats, diagnostics, problems)
 
     write_manifest(
-        DATASET, output_dir, stats,
+        DATASET, output_dir, stats, diagnostics,
         extra={
             "source": SOURCE_NOTE,
             "preprocessing": "leave-one-out, random held-out item (no timestamps)",

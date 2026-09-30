@@ -1,12 +1,12 @@
 # AMusic -- Amazon Music. Far more items than users, so the item tower's
 # input width (num_users = 1776) is unusually narrow relative to the user
-# tower's (num_items = 12926).
+# tower's (num_items = 12,929).
 dataset: AMusic
 data_path: data/AMusic
 batch_size: 64
 
 expected_stats:
   users: 1776
-  items: 12926
+  items: 12929
   interactions: 46087
   sparsity: 99.80

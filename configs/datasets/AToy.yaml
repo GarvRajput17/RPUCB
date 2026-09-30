@@ -1,13 +1,17 @@
 # AToy -- Amazon Toys, sparsest of the five (99.92%) and the largest catalog
-# (33,951 items), so it dominates full-catalog evaluation cost. NOT YET IN
-# THE REPO: obtain from the DeepCF release into data/AToy/, then run
+# (33,953 items), so it dominates full-catalog evaluation cost. From the
+# DeepCF release (Data/AToy.*.rating) into data/AToy/, then
 # `python -m src.data.preprocess.deepcf_dropin --dataset AToy`.
+#
+# Roughly 31% of AToy's test positives have no training interactions and 15
+# test users have none at all. No model here can rank those; see the
+# manifest's diagnostics and the tie handling in src/metrics.py.
 dataset: AToy
 data_path: data/AToy
 batch_size: 256
 
 expected_stats:
   users: 3137
-  items: 33951
+  items: 33953
   interactions: 84642
   sparsity: 99.92

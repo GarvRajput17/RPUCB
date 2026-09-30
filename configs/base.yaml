@@ -60,13 +60,57 @@ num_negatives: 8
 max_epochs: 100
 patience: 10
 min_delta: 0.0001
-val_subsample_size: 1000            # per-epoch val runs on a fixed seeded subsample;
-                                    # test is full-catalog, all users, exactly once
+
+# Which val metric early stopping watches. §5 locks HR@10, and that is kept
+# as the default, but the first-light run showed why it is worth revisiting:
+# under full-catalog evaluation HR@10 yields 5-40 hits per 1,000 users, so
+# it moves in steps of 0.001 with a binomial standard deviation of about 4
+# hits, while min_delta is 0.0001 -- a tenth of one hit. Best-epoch
+# selection is then substantially noise-driven. HR@100 carries roughly six
+# times the hits at no extra cost, since it is already computed.
+early_stopping_metric: HR@10
+
+# Users per per-epoch val pass. null means the full val set, which is worth
+# using wherever it is small (lastfm and AMusic have under 1,800 val users,
+# so the "cheap subsample" saves almost nothing and costs precision).
+val_subsample_size: 1000
+
+# ---- dataloader -------------------------------------------------------
+# 8 workers is wrong on a laptop and inside WSL, where the shared-memory
+# limit surfaces as workers dying mid-epoch. pin_memory: null means "on iff
+# CUDA/HIP is available", so a CPU run stops emitting the warning.
+num_workers: 8
+pin_memory: null
+
+# Adam keeps two moments per parameter, so storing optimizer state triples
+# every checkpoint -- 108.7 MB instead of ~36 MB for DeepCF on AMusic --
+# and nothing reads it back: --skip-existing resumes at run granularity and
+# a killed run restarts from epoch 0. Turn on only with a real resume path.
+checkpoint_optimizer_state: false
 
 # ---- evaluation -------------------------------------------------------
 user_batch_size: 64
 item_encode_chunk: 8192
 pair_chunk: 262144
+
+# How a positive that ties with other items is ranked. "mid" is the
+# expected rank under random tie-breaking, and is the default because the
+# alternative silently rewards artifacts: items with no train interactions
+# all receive one shared embedding, and for MIND a user with no train
+# history makes every item score exactly 0.0. Under "optimistic" both are
+# free rank-1 hits -- 43 of them on AMusic, 65% of MIND's first-light
+# HR@10. Cold fractions rise with sparsity (0% on lastfm to 30% on AToy),
+# so the artifact would grow along the same axis as the central
+# hypothesis. Run "optimistic" only as a sensitivity check: the gap
+# between it and "mid" measures the artifact.
+tie_policy: mid                     # mid | optimistic | pessimistic
+tie_atol: 0.000001                  # tolerance, not ==: identical inputs can
+                                    # differ by an ulp across matmul chunks
+
+# Score every split by train popularity as well, as a non-personalised
+# floor. Model-free and cheap; a model that cannot beat it is not
+# personalising.
+popularity_reference: true
 
 # ---- seeds ------------------------------------------------------------
 base_seed: 42                       # runs use base_seed .. base_seed + runs - 1

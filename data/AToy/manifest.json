@@ -1,0 +1,47 @@
+{
+  "dataset": "AToy",
+  "stats": {
+    "users": 3137,
+    "items": 33953,
+    "interactions": 84642,
+    "sparsity": 99.92,
+    "train_pairs": 81505,
+    "test_pairs": 3137,
+    "duplicate_train_rows": 0,
+    "duplicate_test_rows": 0,
+    "test_item_in_own_train": 0,
+    "users_without_test_row": 0,
+    "users_with_multiple_test_rows": 0,
+    "unused_user_ids": 0,
+    "unused_item_ids": 0
+  },
+  "files": {
+    "train.rating": {
+      "sha256": "03abd02341cbe87295fc333c2553614f024d453fcbe037f58d8bd90d4fafea72",
+      "bytes": 1086797
+    },
+    "test.rating": {
+      "sha256": "532639c8bbe3aa0451ac4000998c3fccc38ca463006335fb815a75c8ad577d71",
+      "bytes": 42381
+    }
+  },
+  "diagnostics": {
+    "interactions_per_user": {
+      "min": 1,
+      "median": 22,
+      "below_5": 71
+    },
+    "interactions_per_item": {
+      "min": 1,
+      "median": 1,
+      "below_5": 30613
+    },
+    "trainless_test_users": 15,
+    "trainless_test_users_fraction": 0.0048,
+    "cold_test_positives": 950,
+    "cold_test_positives_fraction": 0.3028,
+    "cold_catalog_items": 891
+  },
+  "source": "DeepCF (Deng et al.) benchmark release -- https://github.com/familyld/DeepCF (Data/AToy.train.rating, Data/AToy.test.rating). Leave-one-out split upstream. NOT uniformly k-core filtered: ml-1m and lastfm have >= 20 interactions per user, but AMusic and AToy go down to 1 per user and 1 per item -- see the manifest's diagnostics block for per-dataset minimums.",
+  "preprocessing": "none (drop-in, validated only)"
+}

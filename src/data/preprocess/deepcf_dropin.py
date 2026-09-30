@@ -27,7 +27,7 @@ import argparse
 from pathlib import Path
 
 from .common import (
-    EXPECTED_STATS,
+    compute_diagnostics,
     compute_stats,
     read_pairs,
     report,
@@ -37,14 +37,20 @@ from .common import (
 
 DROPIN_DATASETS = ["ml-1m", "lastfm", "AMusic", "AToy"]
 
-# Where each dataset's train.rating / test.rating live. lastfm and AToy are
-# not yet in the repo -- both come from the DeepCF release
-# (https://github.com/familyld/DeepCF), same format as ml-1m and AMusic.
+# Where each dataset's train.rating / test.rating live. All four come from the
+# DeepCF release, which names them Data/{name}.train.rating etc.; download
+# them into data/{name}/train.rating and data/{name}/test.rating. Column
+# counts differ (ml-1m has user, item, rating, timestamp; the others have a
+# third column of rating or play count) and lastfm/AToy use CRLF endings --
+# read_pairs handles both.
 DEFAULT_DATA_ROOT = Path("data")
 
 SOURCE_NOTE = (
-    "DeepCF (Deng et al.) benchmark release -- https://github.com/familyld/DeepCF. "
-    "Already 5-core filtered and leave-one-out split upstream."
+    "DeepCF (Deng et al.) benchmark release -- https://github.com/familyld/DeepCF "
+    "(Data/{name}.train.rating, Data/{name}.test.rating). Leave-one-out split "
+    "upstream. NOT uniformly k-core filtered: ml-1m and lastfm have >= 20 "
+    "interactions per user, but AMusic and AToy go down to 1 per user and 1 per "
+    "item -- see the manifest's diagnostics block for per-dataset minimums."
 )
 
 
@@ -66,15 +72,19 @@ def process(dataset, data_root=DEFAULT_DATA_ROOT, strict=True):
     test_pairs = read_pairs(test_path)
 
     stats = compute_stats(train_pairs, test_pairs)
+    diagnostics = compute_diagnostics(train_pairs, test_pairs)
     problems = verify_stats(dataset, stats, strict=strict)
-    report(dataset, stats, problems)
+    report(dataset, stats, diagnostics, problems)
 
-    manifest = write_manifest(
-        dataset, data_dir, stats,
-        extra={"source": SOURCE_NOTE, "preprocessing": "none (drop-in, validated only)"},
+    write_manifest(
+        dataset, data_dir, stats, diagnostics,
+        extra={
+            "source": SOURCE_NOTE.format(name=dataset),
+            "preprocessing": "none (drop-in, validated only)",
+        },
     )
     print(f"  wrote {data_dir}/manifest.json")
-    return manifest
+    return problems
 
 
 def main():
@@ -93,19 +103,26 @@ def main():
         parser.error("pass --dataset NAME or --all")
 
     targets = DROPIN_DATASETS if args.all else [args.dataset]
-    failures = []
+    failed = []
     for dataset in targets:
         try:
-            process(dataset, args.data_root, strict=not args.no_strict)
+            problems = process(dataset, args.data_root, strict=not args.no_strict)
         except SystemExit as exc:
-            failures.append((dataset, str(exc)))
             print(exc)
+            failed.append(dataset)
+            continue
+        # Under --no-strict, verify_stats reports rather than raises, so a
+        # mismatch has to be counted here. The previous version printed
+        # "All N dataset(s) match §4" whenever nothing raised -- which under
+        # --no-strict meant it announced success over visible mismatches.
+        if problems:
+            failed.append(dataset)
 
-    if failures:
-        print(f"\n{len(failures)} of {len(targets)} dataset(s) failed the Phase 1 gate.")
+    passed = len(targets) - len(failed)
+    print(f"\nPhase 1 gate: {passed} of {len(targets)} dataset(s) passed.")
+    if failed:
+        print(f"  failed: {', '.join(failed)}")
         raise SystemExit(1)
-    print(f"\nAll {len(targets)} dataset(s) match §4 "
-          f"({', '.join(str(EXPECTED_STATS[d]['interactions']) for d in targets)} interactions).")
 
 
 if __name__ == "__main__":
