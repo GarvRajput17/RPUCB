@@ -61,19 +61,27 @@ max_epochs: 100
 patience: 10
 min_delta: 0.0001
 
-# Which val metric early stopping watches. §5 locks HR@10, and that is kept
-# as the default, but the first-light run showed why it is worth revisiting:
+# Which val metric early stopping watches. DEVIATION from §5, which locked
+# HR@10 -- record in the deviations register. First light showed why:
 # under full-catalog evaluation HR@10 yields 5-40 hits per 1,000 users, so
-# it moves in steps of 0.001 with a binomial standard deviation of about 4
-# hits, while min_delta is 0.0001 -- a tenth of one hit. Best-epoch
-# selection is then substantially noise-driven. HR@100 carries roughly six
-# times the hits at no extra cost, since it is already computed.
-early_stopping_metric: HR@10
+# it moves in steps of one hit against a min_delta of a tenth of one. That
+# noise does two things. It makes best-epoch selection partly a lottery,
+# and it ends runs early: one lucky epoch sets a best the next `patience`
+# epochs cannot beat. Both effects are worst where hits are rarest -- the
+# sparse datasets, which is the axis the central hypothesis is about.
+# HR@100 carries roughly six times the hits and is already computed every
+# epoch, so this costs nothing. HR@10 remains a reported metric; it no
+# longer drives selection. Must not change after Stage G: it decides which
+# checkpoint every tuning and matrix run keeps.
+early_stopping_metric: HR@100
 
-# Users per per-epoch val pass. null means the full val set, which is worth
-# using wherever it is small (lastfm and AMusic have under 1,800 val users,
-# so the "cheap subsample" saves almost nothing and costs precision).
-val_subsample_size: 1000
+# Users per per-epoch val pass; null is the full val set. Full everywhere,
+# because nowhere here is the subsample worth its noise: the largest val
+# set is ml-1m's 6,040 users and the largest scoring job is AToy's 3,137 x
+# 33,953 = 107M scores, seconds on the GPU. A per-dataset rule was not an
+# option in any case -- dataset files may not set this key -- and would
+# have been one more thing for the provenance audit to explain.
+val_subsample_size: null
 
 # ---- dataloader -------------------------------------------------------
 # 8 workers is wrong on a laptop and inside WSL, where the shared-memory

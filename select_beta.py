@@ -9,22 +9,24 @@ Run after `experiments/tune_beta.sh` has produced the sweep:
 What it does, and why it is not just `max(val_metrics_at_best)` over the
 results files:
 
-  1. Per-epoch validation is a 1,000-user subsample (`val_subsample_size`
-     in base.yaml). Under full-catalog evaluation that yields 5-40 HR@10
-     hits, so the metric moves in steps of one hit against a `min_delta`
-     of 0.0001. Differences between neighbouring grid points are well
-     inside that noise.
+  1. When `val_subsample_size` is set, per-epoch validation is a subsample.
+     Under full-catalog evaluation that yields few HR@10 hits, so
+     neighbouring grid points differ by less than the noise.
 
-  2. `val_metrics_at_best` is a *maximum over epochs* of that noisy
-     estimate, so it is biased upward, and biased more for the settings
-     whose validation curve is noisiest. Selecting on it therefore has a
-     standing preference for instability.
+  2. `val_metrics_at_best` is a *maximum over epochs* of that estimate, so
+     it is biased upward, and biased more for the noisiest settings.
 
 So each grid point's best checkpoint is re-scored once on the **full**
-validation set, and selection runs on that. The subsampled numbers are
-kept alongside and the report says how often the two would disagree --
-which is the evidence for the paragraph this decision needs in the
-writeup.
+validation set, and selection runs on that.
+
+With `val_subsample_size: null` -- the current setting -- per-epoch
+validation already is the full set, so the re-score should reproduce
+`val_metrics_at_best` to rounding. That makes it a check rather than a
+correction: a grid point whose re-score disagrees with its own recorded
+score has a checkpoint that does not reproduce what training saw, and
+every "subsample disagreement" in the report is then a reproducibility
+problem, not noise. The max-over-epochs bias in point 2 remains either
+way; no re-scoring of the chosen checkpoint can remove it.
 
 The choice itself is arithmetic and lives in `src/tuning.py`; this file
 is the part that needs a GPU.
@@ -191,8 +193,10 @@ def main():
                          help="default: every dataset with rating files on disk")
     parser.add_argument("--seed", type=int, default=None,
                          help="the sweep's single seed; default base_seed from base.yaml")
-    parser.add_argument("--metric", default="HR@10",
-                         help="drives the choice; the others are reported as witnesses")
+    parser.add_argument("--metric", default=None,
+                         help="drives the choice; default is early_stopping_metric from "
+                              "the config, so beta is selected by the same criterion "
+                              "that selected each checkpoint. The others are witnesses.")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--refresh", action="store_true",
                          help="re-score grid points already in the cache")
@@ -223,10 +227,16 @@ def main():
     print(f"Using device: {device}")
     print(f"grid={[f'{b:g}' for b in grid]}  models={models}  datasets={datasets}")
 
+    resolved = load_config(datasets[0], models[0])
     seed = args.seed
     if seed is None:
-        seed = int(load_config(datasets[0], models[0])["base_seed"])
+        seed = int(resolved["base_seed"])
         print(f"seed: {seed} (base_seed)")
+    if args.metric is None:
+        # Selecting beta on a different metric from the one that chose each
+        # run's checkpoint would mix two criteria in one decision.
+        args.metric = resolved.get("early_stopping_metric", "HR@10")
+        print(f"selection metric: {args.metric} (early_stopping_metric)")
 
     cache = load_cache(cache_path)
     missing = []
